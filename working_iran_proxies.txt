@@ -1,8 +1,8 @@
-# Working Iranian Proxies — checked 2026-03-22 21:42 UTC
-# 0 proxies verified
+# Working Iranian Proxies — checked 2026-03-22 21:51 UTC
+# 0 proxies verified (CIDR-confirmed Iranian IPs)
 # 
 #
-# Format: PROTOCOL  IP:PORT  LATENCY  CITY  ISP
+# Format: PROTOCOL  IP:PORT  LATENCY
 #
 
 
