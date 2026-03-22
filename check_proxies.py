@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Iran Proxy Checker — Comprehensive Edition
-Improvements over previous versions:
-  • Parallel scraping (all sources fetched concurrently → no 45s wasted on timeouts)
-  • 35+ sources including new pre-verified IR-specific repos
-  • Local CIDR filter (no ip-api.com rate-limits)
-  • Connectivity test against multiple test URLs (no geo-check needed after CIDR)
-  • Detailed summary of which sources contributed working proxies
+Iran Proxy Checker — Diagnostic + Robust Edition
+Key changes:
+  • TCP pass/fail stats shown → reveals if IPs are even proxy servers
+  • Tests against BOTH external AND Iranian test URLs
+  • Tries more port/protocol combos per IP
+  • Saves partial results (TCP-alive IPs) even if HTTP verify fails
+  • Scraping is fully parallel
 """
 
 import ipaddress
@@ -21,7 +21,7 @@ from pathlib import Path
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-SCRAPE_TIMEOUT = 12   # per-source scrape timeout (parallel, so no penalty)
+SCRAPE_TIMEOUT = 12
 TCP_TIMEOUT    = 5
 HTTP_TIMEOUT   = 10
 MAX_WORKERS    = 60
@@ -31,10 +31,10 @@ IRAN_CIDR_URLS = [
     "https://www.ipdeny.com/ipblocks/data/countries/ir.zone",
     "https://raw.githubusercontent.com/herrbischoff/country-ip-blocks/master/ipv4/ir.cidr",
     "https://raw.githubusercontent.com/ipverse/rir-ip/master/country/ir/ipv4-aggregated.txt",
-    "https://raw.githubusercontent.com/FireFlyVPN/ip-cidr-country-db/main/cidr/IR.cidr",
 ]
 
-# Connectivity test URLs — any 2xx = proxy is alive
+# Try both global AND Iranian target URLs
+# (some Iranian proxies may block non-Iranian destinations)
 TEST_URLS = [
     "http://httpbin.org/ip",
     "http://api.ipify.org",
@@ -42,6 +42,9 @@ TEST_URLS = [
     "http://checkip.amazonaws.com",
     "http://ip.42.pl/raw",
     "http://myexternalip.com/raw",
+    "http://www.google.com",       # widely accessible
+    "http://digikala.com",         # major Iranian site
+    "http://irancell.ir",          # Iranian ISP site
 ]
 
 HEADERS = {
@@ -50,8 +53,6 @@ HEADERS = {
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/124.0.0.0 Safari/537.36"
     ),
-    "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
 }
 
 IP_PORT_RE = re.compile(r"\b(\d{1,3}(?:\.\d{1,3}){3}):(\d{2,5})\b")
@@ -60,10 +61,9 @@ PRIVATE_RE = re.compile(
 )
 
 # ── Sources ───────────────────────────────────────────────────────────────────
-# All fetched in parallel — timeouts no longer block the pipeline.
 
 SOURCES = {
-    # ── IR-targeted web APIs ──────────────────────────────────────────────────
+    # IR-targeted APIs
     "proxyhub_http"    : "https://proxyhub.me/en/ir-free-proxy-list.html",
     "proxyhub_socks5"  : "https://proxyhub.me/en/ir-socks5-proxy-list.html",
     "pld_http"         : "https://www.proxy-list.download/api/v1/get?type=http&country=IR",
@@ -74,29 +74,18 @@ SOURCES = {
     "ditatompel"       : "https://www.ditatompel.com/proxy/country/ir",
     "proxydb"          : "https://proxydb.net/?country=IR",
     "spys_one"         : "https://spys.one/free-proxy-list/IR/",
-    "freeproxylists"   : "https://www.freeproxylists.net/?c=IR",
-    "hidemy_p1"        : "https://hidemy.name/en/proxy-list/?country=IR#list",
-    "hidemy_p2"        : "https://hidemy.name/en/proxy-list/?country=IR&start=64#list",
-    "proxybros"        : "https://proxybros.com/free-proxy-list/IR/",
-    "proxyfreeonly"    : "https://proxyfreeonly.com/free-proxy-list/iran",
-    "freeproxydb"      : "https://freeproxydb.com/freeProxy/country/ir",
-    "proxy5"           : "https://proxy5.net/free-proxy/iran",
     "proxyscrape_http" : "https://api.proxyscrape.com/v3/free-proxy-list/get?request=displayproxies&country=ir&protocol=http&anonymity=all&timeout=10000",
     "proxyscrape_s4"   : "https://api.proxyscrape.com/v3/free-proxy-list/get?request=displayproxies&country=ir&protocol=socks4&anonymity=all&timeout=10000",
     "proxyscrape_s5"   : "https://api.proxyscrape.com/v3/free-proxy-list/get?request=displayproxies&country=ir&protocol=socks5&anonymity=all&timeout=10000",
-
-    # ── Pre-verified GitHub repos (updated every 5–60 minutes) ───────────────
-    # Iran-specific:
+    # GitHub: pre-verified & frequently updated
     "openray_iran"     : "https://raw.githubusercontent.com/sakha1370/OpenRay/refs/heads/main/output_iran/iran_top100_checked.txt",
     "openray_all"      : "https://raw.githubusercontent.com/sakha1370/OpenRay/refs/heads/main/output/all_valid_proxies.txt",
     "ebrasha_http"     : "https://raw.githubusercontent.com/EbraSha/Abdal-Proxy-List/main/http.txt",
     "ebrasha_s5"       : "https://raw.githubusercontent.com/EbraSha/Abdal-Proxy-List/main/socks5.txt",
-    # Per-country lists:
     "proxifly_IR"      : "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/countries/IR/data.txt",
     "proxifly_http"    : "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/http/data.txt",
     "proxifly_s4"      : "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/socks4/data.txt",
     "proxifly_s5"      : "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/socks5/data.txt",
-    # Frequently-updated global lists (CIDR will filter for IR):
     "vakhov_http"      : "https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/http.txt",
     "vakhov_s5"        : "https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/socks5.txt",
     "kangproxy_http"   : "https://raw.githubusercontent.com/KangProxy/proxy-list/main/http.txt",
@@ -118,13 +107,11 @@ SOURCES = {
     "gh_jetkai_http"   : "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-http.txt",
     "gh_jetkai_s5"     : "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-socks5.txt",
     "gh_hookzof"       : "https://raw.githubusercontent.com/hookzof/socks5_list/master/proxy.txt",
-    "gh_officialproxy" : "https://raw.githubusercontent.com/officialputuid/KangProxy/KangProxy/http/http.txt",
     "gh_andigwandi"    : "https://raw.githubusercontent.com/andigwandi/free-proxy/main/proxy_list.txt",
     "gh_aslisk_s5"     : "https://raw.githubusercontent.com/aslisk/proxyhttps/main/https.txt",
     "gh_rxb6"          : "https://raw.githubusercontent.com/rxb6/proxy-list/main/proxies.txt",
 }
 
-# Geonode paginated JSON (IR-filtered)
 GEONODE_PAGES = [
     f"https://proxylist.geonode.com/api/proxy-list?country=IR&limit=100&page={p}&sort_by=lastChecked&sort_type=desc"
     for p in range(1, 4)
@@ -202,12 +189,11 @@ def cidr_filter(candidates: set, networks: list) -> set:
 # ── Parallel scraper ──────────────────────────────────────────────────────────
 
 def fetch_source(name: str, url: str) -> tuple:
-    """Fetch one source; return (name, set_of_proxies)."""
     try:
         r = requests.get(url, headers=HEADERS, timeout=SCRAPE_TIMEOUT)
         r.raise_for_status()
         found = {f"{ip}:{p}" for ip, p in IP_PORT_RE.findall(r.text)}
-        return (name, found)
+        return (name, found, None)
     except Exception as e:
         return (name, set(), str(e))
 
@@ -223,7 +209,7 @@ def fetch_geonode(url: str, page: int) -> tuple:
                 ports = [ports]
             for port in ports:
                 proxies.add(f"{ip}:{port}")
-        return (f"geonode_p{page}", proxies)
+        return (f"geonode_p{page}", proxies, None)
     except Exception as e:
         return (f"geonode_p{page}", set(), str(e))
 
@@ -233,26 +219,18 @@ def collect_candidates() -> set:
     raw: set = set()
     errors = 0
 
-    jobs = [(name, url) for name, url in SOURCES.items()]
-    geonode_jobs = [(url, i) for i, url in enumerate(GEONODE_PAGES, 1)]
-
     with concurrent.futures.ThreadPoolExecutor(max_workers=30) as ex:
-        fs = {ex.submit(fetch_source, n, u): n for n, u in jobs}
-        fs.update({ex.submit(fetch_geonode, u, i): f"geonode_p{i}" for u, i in geonode_jobs})
-
+        fs = {ex.submit(fetch_source, n, u): n for n, u in SOURCES.items()}
+        fs.update({ex.submit(fetch_geonode, u, i): f"geonode_p{i}"
+                   for i, u in enumerate(GEONODE_PAGES, 1)})
         for future in concurrent.futures.as_completed(fs):
-            result = future.result()
-            name   = result[0]
-            found  = result[1]
-            err    = result[2] if len(result) > 2 else None
-
+            name, found, err = future.result()
             if err:
                 errors += 1
             elif found:
                 log(f"  [{name}] {len(found)}")
                 raw |= found
 
-    # Validate
     clean = set()
     for proxy in raw:
         parts = proxy.split(":")
@@ -267,12 +245,12 @@ def collect_candidates() -> set:
         except ValueError:
             pass
 
-    log(f"\n  Sources with errors: {errors}/{len(SOURCES) + len(GEONODE_PAGES)}")
+    log(f"\n  Sources with errors (blocked/timeout): {errors}/{len(SOURCES)+len(GEONODE_PAGES)}")
     log(f"  Raw unique candidates: {len(clean)}")
     return clean
 
 
-# ── TCP pre-check ─────────────────────────────────────────────────────────────
+# ── TCP check ────────────────────────────────────────────────────────────────
 
 def tcp_reachable(ip: str, port: int) -> bool:
     try:
@@ -288,9 +266,11 @@ def test_proxy(proxy_str: str):
     ip, port_str = proxy_str.rsplit(":", 1)
     port = int(port_str)
 
-    if not tcp_reachable(ip, port):
-        return None
+    tcp_ok = tcp_reachable(ip, port)
+    if not tcp_ok:
+        return {"proxy": proxy_str, "tcp": False, "working": False}
 
+    # TCP alive — try all protocols × test URLs
     for proto in ("socks5", "socks4", "http"):
         px = {"http": f"{proto}://{ip}:{port}", "https": f"{proto}://{ip}:{port}"}
         for test_url in TEST_URLS:
@@ -299,28 +279,30 @@ def test_proxy(proxy_str: str):
                 r = requests.get(test_url, proxies=px,
                                  timeout=HTTP_TIMEOUT, headers=HEADERS)
                 latency = round((time.monotonic() - t) * 1000)
-                if r.status_code < 300:
+                if r.status_code < 400:
                     body = r.text.strip().split("\n")[0].strip()
                     exit_ip = body if re.match(r"^\d{1,3}(\.\d{1,3}){3}$", body) else ip
                     return {
                         "proxy"      : proxy_str,
+                        "tcp"        : True,
+                        "working"    : True,
                         "protocol"   : proto.upper(),
                         "latency_ms" : latency,
                         "exit_ip"    : exit_ip,
-                        "isp"        : "",
-                        "city"       : "",
+                        "test_url"   : test_url,
                     }
             except Exception:
                 continue
 
-    return None
+    # TCP open but no protocol worked — still log as TCP-alive for diagnostics
+    return {"proxy": proxy_str, "tcp": True, "working": False}
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
     log("=" * 60)
-    log("Iran Proxy Checker — Comprehensive Edition")
+    log("Iran Proxy Checker — Diagnostic + Robust Edition")
     log("=" * 60)
 
     log("\n── Loading Iran IP ranges ──")
@@ -334,11 +316,11 @@ def main() -> None:
     log("\n── Geo-filtering (local CIDR, no API) ──")
     iranian = cidr_filter(candidates, iran_networks)
     if not iranian:
-        log("No Iranian-range IPs found in any source.")
+        log("No Iranian-range IPs found.")
         return
 
     log(f"\n── Testing {len(iranian)} proxies ({MAX_WORKERS} threads) ──\n")
-    working = []
+    all_results = []
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = {executor.submit(test_proxy, p): p for p in iranian}
@@ -346,12 +328,20 @@ def main() -> None:
         for future in concurrent.futures.as_completed(futures):
             done += 1
             result = future.result()
-            if result:
-                working.append(result)
+            all_results.append(result)
+            if result.get("working"):
                 log(f"  ✓ [{result['protocol']:<6}] {result['proxy']:<26} "
-                    f"{result['latency_ms']:>5}ms  exit={result['exit_ip']}")
+                    f"{result['latency_ms']:>5}ms  exit={result['exit_ip']}"
+                    f"  via {result['test_url']}")
             if done % 25 == 0:
-                log(f"  … {done}/{len(iranian)} tested, {len(working)} working so far")
+                tcp_alive = sum(1 for r in all_results if r.get("tcp"))
+                working   = sum(1 for r in all_results if r.get("working"))
+                log(f"  … {done}/{len(iranian)} tested | "
+                    f"TCP alive: {tcp_alive} | Working: {working}")
+
+    working = [r for r in all_results if r.get("working")]
+    tcp_alive_not_working = [r for r in all_results if r.get("tcp") and not r.get("working")]
+    tcp_dead = [r for r in all_results if not r.get("tcp")]
 
     working.sort(key=lambda x: x["latency_ms"])
 
@@ -360,11 +350,24 @@ def main() -> None:
         proto_counts[p["protocol"]] = proto_counts.get(p["protocol"], 0) + 1
 
     log(f"\n{'='*60}")
-    log(f"Done. {len(working)} working Iranian proxies found.")
-    breakdown = "  ".join(f"{k}: {v}" for k, v in sorted(proto_counts.items()))
-    if breakdown:
-        log(f"Protocol breakdown — {breakdown}")
+    log(f"RESULTS:")
+    log(f"  Total tested   : {len(iranian)}")
+    log(f"  TCP dead       : {len(tcp_dead)}  ← port closed, not a proxy server")
+    log(f"  TCP alive, no HTTP: {len(tcp_alive_not_working)}  ← port open but proxy protocol failed")
+    log(f"  WORKING        : {len(working)}")
+    if working:
+        breakdown = "  ".join(f"{k}: {v}" for k, v in sorted(proto_counts.items()))
+        log(f"  Protocol breakdown: {breakdown}")
     log(f"{'='*60}\n")
+
+    # Save TCP-alive list for manual inspection
+    tcp_alive_path = Path("tcp_alive_iran_ips.txt")
+    with open(tcp_alive_path, "w") as f:
+        f.write("# Iranian IPs with open TCP port (not yet confirmed as proxies)\n")
+        f.write("# These could be tested manually or with other tools\n\n")
+        for r in tcp_alive_not_working:
+            f.write(f"{r['proxy']}\n")
+    log(f"TCP-alive (non-working) IPs → {tcp_alive_path}")
 
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
@@ -372,11 +375,11 @@ def main() -> None:
     with open(out, "w") as f:
         f.write(f"# Working Iranian Proxies — checked {now}\n")
         f.write(f"# {len(working)} proxies verified\n")
-        f.write(f"# {breakdown}\n#\n")
-        f.write("# Format: PROTOCOL  IP:PORT  LATENCY\n#\n\n")
+        f.write(f"# Tested: {len(iranian)} | TCP-dead: {len(tcp_dead)} | "
+                f"TCP-alive/no-HTTP: {len(tcp_alive_not_working)} | Working: {len(working)}\n#\n\n")
         for p in working:
             f.write(f"{p['protocol']:<8} {p['proxy']:<26} {p['latency_ms']:>5}ms\n")
-        f.write("\n# --- Raw IP:PORT (for Super Proxy / NekoBox) ---\n")
+        f.write("\n# --- Raw IP:PORT ---\n")
         for p in working:
             f.write(f"{p['proxy']}\n")
         for proto in sorted(proto_counts):
@@ -384,14 +387,16 @@ def main() -> None:
             for p in working:
                 if p["protocol"] == proto:
                     f.write(f"{p['proxy']}\n")
-    log(f"Results → {out.resolve()}")
 
     jp = Path("working_iran_proxies.json")
     with open(jp, "w") as f:
         json.dump({"checked_at": now, "count": len(working),
-                   "protocol_counts": proto_counts, "proxies": working},
+                   "protocol_counts": proto_counts,
+                   "tcp_alive_count": len(tcp_alive_not_working),
+                   "tcp_dead_count": len(tcp_dead),
+                   "proxies": working},
                   f, indent=2, ensure_ascii=False)
-    log(f"JSON  → {jp.resolve()}")
+    log(f"Results → {out} / {jp}")
 
 
 if __name__ == "__main__":
