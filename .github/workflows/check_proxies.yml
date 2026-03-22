@@ -2,18 +2,16 @@ name: Iran Proxy Checker
 
 on:
   schedule:
-    # Runs every day at **:** UTC (**:**  Tehran / **:** Vancouver)
-    - cron: "45 20 * * *"
-  # Allow manual trigger from GitHub Actions tab
+    - cron: "30 20 * * *"
   workflow_dispatch:
 
 jobs:
   check-proxies:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30        # increased: geo-filter needs ~6 min extra
 
     permissions:
-      contents: write   # needed to push results back to the repo
+      contents: write
 
     steps:
       - name: Checkout repo
