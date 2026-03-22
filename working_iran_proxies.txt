@@ -1,9 +1,7 @@
-# Working Iranian Proxies — checked 2026-03-22 21:59 UTC
+# Working Iranian Proxies — checked 2026-03-22 22:08 UTC
 # 0 proxies verified
-# 
-#
-# Format: PROTOCOL  IP:PORT  LATENCY
+# Tested: 238 | TCP-dead: 229 | TCP-alive/no-HTTP: 9 | Working: 0
 #
 
 
-# --- Raw IP:PORT (for Super Proxy / NekoBox) ---
+# --- Raw IP:PORT ---

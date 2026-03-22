@@ -1,6 +1,8 @@
 {
-  "checked_at": "2026-03-22 21:59 UTC",
+  "checked_at": "2026-03-22 22:08 UTC",
   "count": 0,
   "protocol_counts": {},
+  "tcp_alive_count": 9,
+  "tcp_dead_count": 229,
   "proxies": []
 }
