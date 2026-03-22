@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-Iran Proxy Checker — Throttled GeoFilter Edition
+Iran Proxy Checker — Local CIDR Filter Edition
 Strategy:
-  1. Scrape all sources (IR-targeted + global GitHub lists)
-  2. Batch geo-filter via ip-api.com with 1.5s sleep between batches
-     → stays under 45 req/min free-tier limit, retries on failure
-  3. Test only the confirmed Iranian proxies
+  1. Download Iran's IP CIDR blocks from ipdeny.com (~2KB, ONE request, no rate-limit)
+  2. Filter all candidates LOCALLY using Python's ipaddress module — instant
+  3. Test only the Iranian-range IPs as proxies
+  Typical: 26,000 candidates → ~150 Iranian → done in ~2 minutes
 """
 
+import ipaddress
 import socket
 import requests
 import concurrent.futures
@@ -23,10 +24,13 @@ TCP_TIMEOUT   = 4
 PROXY_TIMEOUT = 12
 MAX_WORKERS   = 50
 COUNTRY_CODE  = "IR"
-BATCH_SLEEP   = 1.5   # seconds between geo-lookup batches (keeps us ≤40 req/min)
-BATCH_RETRIES = 3     # retry each batch this many times on failure
 
-GEOIP_BATCH_URL = "http://ip-api.com/batch?fields=status,countryCode,query"
+# Iran CIDR sources — tried in order, first success wins
+IRAN_CIDR_URLS = [
+    "https://www.ipdeny.com/ipblocks/data/countries/ir.zone",
+    "https://raw.githubusercontent.com/herrbischoff/country-ip-blocks/master/ipv4/ir.cidr",
+    "https://raw.githubusercontent.com/ipverse/rir-ip/master/country/ir/ipv4-aggregated.txt",
+]
 
 VERIFY_URLS = [
     "http://ip-api.com/json/?fields=status,countryCode,query,org,city",
@@ -50,7 +54,6 @@ PRIVATE_RE = re.compile(
 # ── Sources ───────────────────────────────────────────────────────────────────
 
 RAW_TEXT_SOURCES = {
-    # IR-targeted (some may be blocked, that's fine)
     "proxyhub_http"   : "https://proxyhub.me/en/ir-free-proxy-list.html",
     "proxyhub_socks5" : "https://proxyhub.me/en/ir-socks5-proxy-list.html",
     "pld_http"        : "https://www.proxy-list.download/api/v1/get?type=http&country=IR",
@@ -60,8 +63,7 @@ RAW_TEXT_SOURCES = {
     "advanced_s5"     : "https://advanced.name/freeproxy?country=IR&type=socks5",
     "ditatompel"      : "https://www.ditatompel.com/proxy/country/ir",
     "proxydb"         : "https://proxydb.net/?country=IR",
-
-    # Global GitHub lists — geo-filter handles IR extraction
+    "spys_one"        : "https://spys.one/free-proxy-list/IR/",
     "gh_zaeem_http"   : "https://raw.githubusercontent.com/Zaeem20/FREE_PROXIES_LIST/master/http.txt",
     "gh_zaeem_s5"     : "https://raw.githubusercontent.com/Zaeem20/FREE_PROXIES_LIST/master/socks5.txt",
     "gh_razvan_s5"    : "https://raw.githubusercontent.com/im-razvan/proxy_list/main/socks5.txt",
@@ -99,13 +101,86 @@ def log(msg: str) -> None:
     print(f"[{ts}] {msg}", flush=True)
 
 
+# ── Iran CIDR loader ──────────────────────────────────────────────────────────
+
+def load_iran_networks() -> list:
+    cidr_re = re.compile(r"(\d{1,3}(?:\.\d{1,3}){3}/\d{1,2})")
+    for url in IRAN_CIDR_URLS:
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=15)
+            r.raise_for_status()
+            nets = []
+            for line in r.text.splitlines():
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                m = cidr_re.search(line)
+                if m:
+                    try:
+                        nets.append(ipaddress.IPv4Network(m.group(1), strict=False))
+                    except ValueError:
+                        pass
+            if nets:
+                log(f"  Loaded {len(nets)} Iran CIDR blocks from {url}")
+                return nets
+        except Exception as e:
+            log(f"  ! CIDR source failed ({url}): {e}")
+
+    # Hardcoded fallback — major Iranian ISP prefixes
+    log("  WARNING: Using hardcoded fallback CIDR list")
+    fallback = [
+        "2.144.0.0/12","2.176.0.0/12","5.22.0.0/17","5.56.128.0/17",
+        "5.160.0.0/14","5.200.0.0/14","5.134.128.0/18","5.253.24.0/22",
+        "31.2.128.0/17","31.14.80.0/20","31.24.200.0/21","37.0.72.0/21",
+        "37.32.0.0/11","37.98.0.0/15","37.156.0.0/14","37.255.0.0/16",
+        "46.36.96.0/20","46.100.0.0/14","46.209.0.0/16","46.224.0.0/12",
+        "62.60.128.0/17","62.193.0.0/16","77.36.128.0/17","78.38.0.0/15",
+        "78.157.32.0/21","79.127.0.0/17","80.66.176.0/20","80.191.0.0/16",
+        "80.210.0.0/15","82.99.192.0/18","83.120.0.0/14","84.241.0.0/16",
+        "85.9.64.0/18","85.15.0.0/16","85.133.128.0/17","85.185.0.0/16",
+        "85.198.0.0/15","87.107.0.0/16","87.247.160.0/19","87.248.0.0/15",
+        "89.32.0.0/14","89.144.128.0/17","89.165.0.0/16","89.196.0.0/14",
+        "91.92.0.0/20","91.99.128.0/17","91.185.128.0/17","91.207.140.0/23",
+        "91.209.76.0/22","91.212.0.0/21","91.217.40.0/22","91.219.68.0/22",
+        "91.220.96.0/21","91.221.164.0/22","91.228.148.0/22","91.238.0.0/19",
+        "92.42.48.0/20","92.114.0.0/15","92.242.192.0/18","93.93.204.0/23",
+        "94.74.128.0/17","94.182.0.0/15","95.38.0.0/15","95.64.0.0/18",
+        "194.225.0.0/16",
+    ]
+    nets = []
+    for c in fallback:
+        try:
+            nets.append(ipaddress.IPv4Network(c, strict=False))
+        except ValueError:
+            pass
+    return nets
+
+
+# ── Local CIDR filter — NO external API, NO rate-limits ──────────────────────
+
+def cidr_filter(candidates: set, networks: list) -> set:
+    log(f"CIDR-filtering {len(candidates)} candidates locally (no API calls)…")
+    t = time.monotonic()
+    result = set()
+    for proxy in candidates:
+        ip = proxy.split(":")[0]
+        try:
+            addr = ipaddress.IPv4Address(ip)
+            if any(addr in net for net in networks):
+                result.add(proxy)
+        except ValueError:
+            pass
+    log(f"  → {len(result)} Iranian candidates in {round(time.monotonic()-t, 2)}s")
+    return result
+
+
 # ── Scrapers ──────────────────────────────────────────────────────────────────
 
 def scrape_raw(name: str, url: str) -> set:
     try:
         r = requests.get(url, headers=HEADERS, timeout=15)
         r.raise_for_status()
-        found = {f"{ip}:{port}" for ip, port in IP_PORT_RE.findall(r.text)}
+        found = {f"{ip}:{p}" for ip, p in IP_PORT_RE.findall(r.text)}
         if found:
             log(f"  [{name}] {len(found)}")
         return found
@@ -118,7 +193,7 @@ def scrape_proxyscrape(name: str, url: str) -> set:
     try:
         r = requests.get(url, headers=HEADERS, timeout=15)
         r.raise_for_status()
-        found = {ln.strip() for ln in r.text.strip().splitlines() if IP_PORT_RE.match(ln.strip())}
+        found = {ln.strip() for ln in r.text.splitlines() if IP_PORT_RE.match(ln.strip())}
         if found:
             log(f"  [{name}] {len(found)}")
         return found
@@ -168,75 +243,8 @@ def collect_candidates() -> set:
                 clean.add(proxy)
         except ValueError:
             pass
-
-    log(f"\nTotal candidates: {len(clean)}")
+    log(f"\nRaw candidates: {len(clean)}")
     return clean
-
-
-# ── Batch GeoIP filter (throttled) ───────────────────────────────────────────
-
-def geoip_batch_once(ips: list) -> list:
-    """Single attempt at one batch. Returns parsed JSON list or raises."""
-    payload = [{"query": ip} for ip in ips]
-    r = requests.post(GEOIP_BATCH_URL, json=payload, headers=HEADERS, timeout=20)
-    if r.status_code == 429:
-        raise RuntimeError("rate-limited (429)")
-    if not r.text.strip():
-        raise RuntimeError("empty response")
-    return r.json()
-
-
-def batch_geofilter(candidates: set) -> set:
-    """
-    Throttled batch geo-filter.
-    Sleeps BATCH_SLEEP seconds after every request → ~40 req/min < 45/min limit.
-    Retries each failing batch up to BATCH_RETRIES times with exponential backoff.
-    """
-    ip_to_proxies: dict = {}
-    for proxy in candidates:
-        ip = proxy.split(":")[0]
-        ip_to_proxies.setdefault(ip, set()).add(proxy)
-
-    unique_ips = list(ip_to_proxies.keys())
-    total_batches = (len(unique_ips) + 99) // 100
-    log(f"Geo-filtering {len(unique_ips)} unique IPs in {total_batches} batches "
-        f"({BATCH_SLEEP}s between each)…")
-
-    iranian_proxies: set = set()
-    eta_min = round(total_batches * BATCH_SLEEP / 60, 1)
-    log(f"Estimated geo-filter time: ~{eta_min} min")
-
-    for batch_num, i in enumerate(range(0, len(unique_ips), 100)):
-        batch = unique_ips[i:i + 100]
-        success = False
-
-        for attempt in range(1, BATCH_RETRIES + 1):
-            try:
-                results = geoip_batch_once(batch)
-                for entry in results:
-                    if (entry.get("status") == "success"
-                            and entry.get("countryCode") == COUNTRY_CODE):
-                        iranian_proxies |= ip_to_proxies.get(entry["query"], set())
-                success = True
-                break
-            except Exception as e:
-                wait = BATCH_SLEEP * (2 ** attempt)   # 3s, 6s, 12s
-                log(f"  ! batch {batch_num} attempt {attempt} failed ({e}) — "
-                    f"retry in {wait:.0f}s")
-                time.sleep(wait)
-
-        if not success:
-            log(f"  ✗ batch {batch_num} skipped after {BATCH_RETRIES} attempts")
-
-        # Always throttle — even after retries
-        time.sleep(BATCH_SLEEP)
-
-        if (batch_num + 1) % 50 == 0:
-            log(f"  … {batch_num + 1}/{total_batches} batches done, "
-                f"{len(iranian_proxies)} IR proxies so far")
-
-    log(f"Iranian candidates after geo-filter: {len(iranian_proxies)}")
-    return iranian_proxies
 
 
 # ── TCP pre-check ─────────────────────────────────────────────────────────────
@@ -249,9 +257,9 @@ def tcp_reachable(ip: str, port: int) -> bool:
         return False
 
 
-# ── Country detection helpers ─────────────────────────────────────────────────
+# ── Proxy test ────────────────────────────────────────────────────────────────
 
-def country_from_response(data: dict) -> str:
+def country_from(data: dict) -> str:
     if data.get("status") == "success" and "countryCode" in data:
         return data["countryCode"]
     if data.get("success", True) and "country_code" in data:
@@ -259,32 +267,26 @@ def country_from_response(data: dict) -> str:
     return ""
 
 
-# ── Full proxy test ───────────────────────────────────────────────────────────
-
 def test_proxy(proxy_str: str):
     ip, port_str = proxy_str.rsplit(":", 1)
     port = int(port_str)
-
     if not tcp_reachable(ip, port):
         return None
-
     for proto in ("socks5", "socks4", "http"):
-        proxy_url = f"{proto}://{ip}:{port}"
-        proxies   = {"http": proxy_url, "https": proxy_url}
+        proxies = {"http": f"{proto}://{ip}:{port}", "https": f"{proto}://{ip}:{port}"}
         for verify_url in VERIFY_URLS:
             try:
-                start   = time.monotonic()
-                r       = requests.get(verify_url, proxies=proxies,
-                                       timeout=PROXY_TIMEOUT, headers=HEADERS)
-                latency = round((time.monotonic() - start) * 1000)
-                data    = r.json()
-                if country_from_response(data) == COUNTRY_CODE:
+                t = time.monotonic()
+                r = requests.get(verify_url, proxies=proxies,
+                                 timeout=PROXY_TIMEOUT, headers=HEADERS)
+                latency = round((time.monotonic() - t) * 1000)
+                data = r.json()
+                if country_from(data) == COUNTRY_CODE:
                     return {
-                        "proxy"      : proxy_str,
-                        "protocol"   : proto.upper(),
-                        "latency_ms" : latency,
-                        "isp"        : data.get("org") or data.get("connection", {}).get("isp", ""),
-                        "city"       : data.get("city", ""),
+                        "proxy": proxy_str, "protocol": proto.upper(),
+                        "latency_ms": latency,
+                        "isp": data.get("org") or data.get("connection", {}).get("isp", ""),
+                        "city": data.get("city", ""),
                         "verified_ip": data.get("query") or data.get("ip", ""),
                     }
                 break
@@ -297,46 +299,55 @@ def test_proxy(proxy_str: str):
 
 def main() -> None:
     log("=" * 60)
-    log("Iran Proxy Checker — Throttled GeoFilter Edition")
+    log("Iran Proxy Checker — Local CIDR Filter Edition")
     log("=" * 60)
+
+    log("\n── Loading Iran IP ranges ──")
+    iran_networks = load_iran_networks()
+    if not iran_networks:
+        log("ERROR: Could not load Iran CIDR blocks.")
+        return
 
     candidates = collect_candidates()
     if not candidates:
         log("ERROR: No candidates scraped.")
         return
 
-    iranian = batch_geofilter(candidates)
+    log("\n── Geo-filtering (local, no API) ──")
+    iranian = cidr_filter(candidates, iran_networks)
     if not iranian:
-        log("No Iranian IPs found. Aborting.")
+        log("No Iranian-range IPs found.")
         return
 
-    log(f"\nTesting {len(iranian)} Iranian proxies ({MAX_WORKERS} threads)…\n")
+    log(f"\n── Testing {len(iranian)} proxies ({MAX_WORKERS} threads) ──\n")
     working = []
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = {executor.submit(test_proxy, p): p for p in iranian}
+        done = 0
         for future in concurrent.futures.as_completed(futures):
+            done += 1
             result = future.result()
             if result:
                 working.append(result)
                 log(f"  ✓ [{result['protocol']:<6}] {result['proxy']:<26} "
                     f"{result['latency_ms']:>5}ms  {result['city']}  {result['isp']}")
+            if done % 25 == 0:
+                log(f"  … {done}/{len(iranian)} tested, {len(working)} working so far")
 
     working.sort(key=lambda x: x["latency_ms"])
-
-    proto_counts = {}
+    proto_counts: dict = {}
     for p in working:
         proto_counts[p["protocol"]] = proto_counts.get(p["protocol"], 0) + 1
 
-    breakdown = "  ".join(f"{k}: {v}" for k, v in sorted(proto_counts.items()))
     log(f"\n{'='*60}")
-    log(f"Done. {len(working)} working Iranian proxies.")
+    log(f"Done. {len(working)} working Iranian proxies found.")
+    breakdown = "  ".join(f"{k}: {v}" for k, v in sorted(proto_counts.items()))
     if breakdown:
-        log(f"Protocols — {breakdown}")
+        log(f"Protocol breakdown — {breakdown}")
     log(f"{'='*60}\n")
 
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-
     out = Path("working_iran_proxies.txt")
     with open(out, "w") as f:
         f.write(f"# Working Iranian Proxies — checked {now}\n")
