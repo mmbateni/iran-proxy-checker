@@ -1,8 +1,9 @@
-# Working Iranian Proxies — checked 2026-03-22 20:20 UTC
-# 0 proxies verified via ip-api.com
+# Working Iranian Proxies — checked 2026-03-22 21:21 UTC
+# 0 proxies verified
+# 
 #
-# Format: PROTOCOL  IP:PORT  LATENCY  ISP
+# Format: PROTOCOL  IP:PORT  LATENCY  CITY  ISP
 #
 
 
-# --- Raw IP:PORT list (for apps like Super Proxy) ---
+# --- Raw IP:PORT (for Super Proxy / NekoBox) ---
