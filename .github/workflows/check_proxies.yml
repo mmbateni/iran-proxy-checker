@@ -1,0 +1,48 @@
+name: Iran Proxy Checker
+
+on:
+  schedule:
+    # Runs every day at 06:00 UTC (9:30 AM Tehran / 11 PM Vancouver)
+    - cron: "0 6 * * *"
+  # Allow manual trigger from GitHub Actions tab
+  workflow_dispatch:
+
+jobs:
+  check-proxies:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    permissions:
+      contents: write   # needed to push results back to the repo
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests pysocks
+
+      - name: Run proxy checker
+        run: python check_proxies.py
+
+      - name: Upload results as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: iran-proxies-${{ github.run_id }}
+          path: |
+            working_iran_proxies.txt
+            working_iran_proxies.json
+          retention-days: 7
+
+      - name: Commit results back to repo
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add working_iran_proxies.txt working_iran_proxies.json
+          git diff --cached --quiet || git commit -m "chore: update proxies $(date -u +'%Y-%m-%d %H:%M UTC')"
+          git push
