@@ -2,20 +2,20 @@ name: Iran Proxy Checker
 
 on:
   schedule:
-    - cron: "30 20 * * *"
+    - cron: "30 20 * * *"   # 20:30 UTC daily
   workflow_dispatch:
 
 jobs:
-  check-proxies:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30        # increased: geo-filter needs ~6 min extra
-
+  # ── Job 1: Self-hosted runner (your VPS — can reach Iranian IPs) ────────────
+  check-proxies-selfhosted:
+    runs-on: self-hosted          # ← your VPS runner
+    timeout-minutes: 15
+    continue-on-error: true       # fallback to Job 2 if self-hosted is offline
     permissions:
       contents: write
 
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -28,19 +28,61 @@ jobs:
       - name: Run proxy checker
         run: python check_proxies.py
 
-      - name: Upload results as artifact
+      - name: Upload results
         uses: actions/upload-artifact@v4
         with:
-          name: iran-proxies-${{ github.run_id }}
+          name: iran-proxies-selfhosted-${{ github.run_id }}
           path: |
             working_iran_proxies.txt
             working_iran_proxies.json
           retention-days: 7
 
-      - name: Commit results back to repo
+      - name: Commit results
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add working_iran_proxies.txt working_iran_proxies.json
-          git diff --cached --quiet || git commit -m "chore: update proxies $(date -u +'%Y-%m-%d %H:%M UTC')"
+          git diff --cached --quiet || git commit -m "chore: update proxies $(date -u +'%Y-%m-%d %H:%M UTC') [self-hosted]"
+          git push
+
+  # ── Job 2: GitHub-hosted fallback (Azure — collect only, no live test) ──────
+  collect-proxies-fallback:
+    runs-on: ubuntu-latest
+    needs: check-proxies-selfhosted
+    if: failure()               # only runs if self-hosted job fails/offline
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests pysocks
+
+      - name: Run proxy checker (collect-only mode)
+        run: python check_proxies.py
+        env:
+          COLLECT_ONLY: "1"     # script checks this env var and skips live test
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: iran-proxies-fallback-${{ github.run_id }}
+          path: |
+            working_iran_proxies.txt
+            working_iran_proxies.json
+          retention-days: 7
+
+      - name: Commit results
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add working_iran_proxies.txt working_iran_proxies.json
+          git diff --cached --quiet || git commit -m "chore: update proxies $(date -u +'%Y-%m-%d %H:%M UTC') [collect-only]"
           git push
