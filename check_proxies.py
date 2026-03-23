@@ -111,16 +111,44 @@ def load_from_json() -> dict:
         return {}
 
 
-def fetch_asn_prefixes_bgpview(asn: str) -> list:
-    url = f"https://api.bgpview.io/asn/{asn.lstrip('AS')}/prefixes"
+def fetch_asn_prefixes(asn: str) -> list:
+    """
+    Fetch announced IPv4 prefixes for an ASN.
+    Tries RIPE Stat first (always reachable), falls back to BGPView.
+    """
+    asn_num = asn.lstrip("AS")
+
+    # ── Primary: RIPE Stat (stat.ripe.net) ────────────────────────────────────
+    # Free, no key, authoritative (RIPE NCC is the European RIR).
+    ripe_url = (f"https://stat.ripe.net/data/announced-prefixes/data.json"
+                f"?resource=AS{asn_num}")
     try:
-        r = requests.get(url, headers=HEADERS, timeout=15)
+        r = requests.get(ripe_url, headers=HEADERS, timeout=20)
+        r.raise_for_status()
+        data = r.json().get("data", {}).get("prefixes", [])
+        if data and isinstance(data, list):
+            pfx = [p["prefix"] for p in data
+                   if isinstance(p, dict) and p.get("prefix")
+                   and ":" not in p["prefix"]]   # IPv4 only
+            if pfx:
+                return sorted(set(pfx))
+    except requests.exceptions.ConnectionError:
+        pass   # offline / blocked
+    except Exception as e:
+        log(f"  ! RIPE Stat {asn}: {e}")
+
+    # ── Fallback: BGPView ──────────────────────────────────────────────────────
+    try:
+        r = requests.get(
+            f"https://api.bgpview.io/asn/{asn_num}/prefixes",
+            headers=HEADERS, timeout=15
+        )
         r.raise_for_status()
         return [p["prefix"] for p in
                 r.json().get("data", {}).get("ipv4_prefixes", [])
                 if p.get("prefix")]
     except requests.exceptions.ConnectionError:
-        return []   # silently skip — DNS blocked on this runner
+        return []
     except Exception as e:
         log(f"  ! BGPView {asn}: {e}")
         return []
@@ -319,7 +347,7 @@ def probe_sites_and_discover(networks: list) -> list:
                     else:
                         log(f"  ? {site:<22} {ip:<18} → {asn_str} "
                             f"— new Iranian ASN, fetching prefixes…")
-                        new_p = fetch_asn_prefixes_bgpview(asn_str)
+                        new_p = fetch_asn_prefixes(asn_str)
                         if new_p:
                             extra.extend([
                                 ipaddress.IPv4Network(p, strict=False)
