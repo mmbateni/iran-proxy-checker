@@ -378,19 +378,24 @@ def fetch_geonode_fresh():
                f"&sort_by=lastChecked&sort_type=desc")
         try:
             r    = requests.get(url, headers=HEADERS, timeout=SCRAPE_TIMEOUT)
-            data = r.json().get("data", [])
-            if not data:
+            body = r.json()
+            # Geonode sometimes returns {"data": null} or {"data": <int>}
+            raw_data = body.get("data", []) if isinstance(body, dict) else []
+            if not raw_data or not isinstance(raw_data, list):
                 break
-            for p in data:
+            for p in raw_data:
+                # Skip non-dict entries (API occasionally returns ints)
+                if not isinstance(p, dict):
+                    continue
                 ip    = p.get("ip", "")
                 ts    = (p.get("updatedAt") or p.get("lastChecked")
                          or p.get("created_at", ""))
                 # port can be int, str, or list — normalise
                 port_raw = p.get("port", [])
                 if isinstance(port_raw, list):
-                    ports = [str(x) for x in port_raw]
+                    ports = [str(x) for x in port_raw if x]
                 else:
-                    ports = [str(port_raw)]
+                    ports = [str(port_raw)] if port_raw else []
                 for port in ports:
                     proxy = f"{ip}:{port}"
                     total += 1
@@ -417,8 +422,14 @@ def fetch_proxyscrape_fresh():
             if not body:
                 continue
             data = r.json()
-            # API may return {"proxies": [...]} or a list directly
-            proxy_list = data if isinstance(data, list) else data.get("proxies", [])
+            # API may return a list, {"proxies": [...]}, or {"proxies": 0}
+            if isinstance(data, list):
+                proxy_list = data
+            elif isinstance(data, dict):
+                raw = data.get("proxies", [])
+                proxy_list = raw if isinstance(raw, list) else []
+            else:
+                proxy_list = []
             for p in proxy_list:
                 if isinstance(p, str):
                     proxy, ts = p, ""
