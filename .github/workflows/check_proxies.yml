@@ -20,9 +20,9 @@ jobs:
       contents: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5.6.0
         with:
           python-version: "3.11"
 
@@ -38,7 +38,7 @@ jobs:
           SCAN_TCP_TO: ${{ github.event.inputs.scan_tcp_to || '0.5' }}
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v4.6.2
         with:
           name: iran-proxies-${{ github.run_id }}
           path: |
