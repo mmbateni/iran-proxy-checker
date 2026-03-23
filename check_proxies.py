@@ -163,7 +163,7 @@ def refresh_json_from_bgpview(existing: dict) -> dict:
     updated = {}
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
-        futures = {ex.submit(fetch_asn_prefixes_bgpview, asn): asn
+        futures = {ex.submit(fetch_asn_prefixes, asn): asn
                    for asn in REACHABLE_ASNS}
         for future in concurrent.futures.as_completed(futures):
             asn = futures[future]
