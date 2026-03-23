@@ -154,12 +154,28 @@ def fetch_asn_prefixes(asn: str) -> list:
         return []
 
 
+def _normalise_prefixes(raw_list) -> set:
+    """
+    Flatten prefix lists that may contain bare strings OR single-element lists
+    produced by R's write_json(auto_unbox = FALSE).
+    Example input:  ["1.2.3.0/24", ["4.5.6.0/24"]]
+    Example output: {"1.2.3.0/24", "4.5.6.0/24"}
+    """
+    out = set()
+    for item in raw_list:
+        if isinstance(item, str):
+            out.add(item)
+        elif isinstance(item, list) and len(item) == 1 and isinstance(item[0], str):
+            out.add(item[0])
+    return out
+
+
 def refresh_json_from_bgpview(existing: dict) -> dict:
     """
-    Refresh ASN prefixes from BGPView. Merges new entries on top of JSON.
-    Runs silently if BGPView is unreachable (e.g. blocked on GitHub Actions).
+    Refresh ASN prefixes from RIPE Stat / BGPView. Merges on top of JSON.
+    Runs silently if both are unreachable (e.g. blocked on GitHub Actions).
     """
-    bgpview_ok = False
+    refresh_ok = False
     updated = {}
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
@@ -170,40 +186,48 @@ def refresh_json_from_bgpview(existing: dict) -> dict:
             try:
                 new_p     = set(future.result())
                 old_entry = existing.get(asn, {})
-                old_p     = set(old_entry.get("prefixes", []))
+                # Normalise old prefixes — may be list-wrapped from R JSON
+                old_p     = _normalise_prefixes(old_entry.get("prefixes", []))
                 merged    = sorted(old_p | new_p)
                 updated[asn] = {"name": old_entry.get("name", asn),
                                  "prefixes": merged}
                 if new_p:
-                    bgpview_ok = True
+                    refresh_ok = True
                     delta = len(merged) - len(old_p)
                     log(f"    {asn:<12} {len(merged):>4} prefixes "
                         f"({'+'  if delta >= 0 else ''}{delta})")
-                else:
-                    # No new data — keep existing silently
-                    pass
             except Exception:
                 if asn in existing:
                     updated[asn] = existing[asn]
 
-    if bgpview_ok:
-        log(f"  BGPView refresh complete")
+    if refresh_ok:
+        log(f"  Refresh complete")
         try:
             with open(ASN_JSON_PATH, "w") as f:
                 json.dump(updated, f, indent=2, ensure_ascii=False)
         except Exception as e:
             log(f"  ! Could not write {ASN_JSON_PATH.name}: {e}")
     else:
-        log(f"  BGPView unreachable — using JSON data only")
+        log(f"  RIPE Stat/BGPView unreachable — using JSON data only")
 
     return updated if updated else existing
 
 
 def build_network_list(asn_data: dict) -> list:
+    """
+    Build a deduplicated list of IPv4Network objects from the ASN data dict.
+    Handles two JSON formats:
+      - prefixes stored as strings:  "1.2.3.0/24"       (Python-written JSON)
+      - prefixes stored as 1-lists:  ["1.2.3.0/24"]     (R write_json default)
+    """
     seen = set()
     nets = []
     for entry in asn_data.values():
-        for cidr in entry.get("prefixes", []):
+        for raw in entry.get("prefixes", []):
+            # Unwrap single-element list produced by R's write_json(auto_unbox=FALSE)
+            cidr = raw[0] if isinstance(raw, list) and len(raw) == 1 else raw
+            if not isinstance(cidr, str):
+                continue
             if cidr in seen:
                 continue
             seen.add(cidr)
