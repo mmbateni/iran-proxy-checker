@@ -1012,11 +1012,16 @@ def save_hiddify_json(all_proxies: dict, working: list,
                       now: str, mode: str,
                       scan_hits: int) -> None:
     """
-    Write hiddify_iran_proxies.json — a valid sing-box config importable
-    directly into Hiddify via URL (raw GitHub link) or local file.
+    Write hiddify_iran_proxies.json — a pure sing-box JSON config
+    importable into Hiddify via URL (raw GitHub link).
 
-    The first lines use // comments which Hiddify reads as profile metadata
-    before parsing the JSON body.
+    Hiddify v4+ uses Go's encoding/json which is strict RFC 8259 —
+    it does NOT support // comments.  Writing pure JSON (no comment
+    lines) is the only reliable format.
+
+    Import in Hiddify:
+      + → Add profile → Remote → paste the raw GitHub URL:
+      https://raw.githubusercontent.com/<user>/iran-proxy-checker/main/hiddify_iran_proxies.json
     """
     config = build_hiddify_singbox(
         all_proxies, working, now, mode, scan_hits, len(all_proxies)
@@ -1025,35 +1030,34 @@ def save_hiddify_json(all_proxies: dict, working: list,
         log("  [hiddify] No candidates — skipping Hiddify JSON")
         return
 
+    # Extract metadata stashed by build_hiddify_singbox
+    meta    = config.pop("_hiddify_meta", {})
+    n_socks = meta.get("socks5_count", 0)
+    n_http  = meta.get("http_count", 0)
+    n_total = meta.get("total_candidates", 0)
+    n_ver   = meta.get("verified_count", 0)
+
+    # Inject a top-level _info key — sing-box ignores unknown top-level keys,
+    # but it gives humans and tooling useful context when inspecting the file.
+    config["_info"] = {
+        "profile_title"           : "Iran Proxies — Active CIDR Scanner",
+        "profile_update_interval" : 24,
+        "generated_at"            : now,
+        "mode"                    : mode,
+        "total_candidates"        : n_total,
+        "socks5_count"            : n_socks,
+        "http_count"              : n_http,
+        "verified_count"          : n_ver,
+        "import_url"              : (
+            "https://raw.githubusercontent.com/"
+            "<your-github-user>/iran-proxy-checker/main/"
+            "hiddify_iran_proxies.json"
+        ),
+    }
+
     path = Path("hiddify_iran_proxies.json")
-
-    # Hiddify profile headers (// lines, read before JSON parsing)
-    meta     = config.pop("_hiddify_meta", {})
-    title    = meta.get("profile_title", "Iran Proxies")
-    interval = meta.get("profile_update_interval", 24)
-    n_socks  = meta.get("socks5_count", 0)
-    n_http   = meta.get("http_count", 0)
-    n_total  = meta.get("total_candidates", 0)
-    n_ver    = meta.get("verified_count", 0)
-
-    header = (
-        f"// #profile-title: {title}\n"
-        f"// #profile-update-interval: {interval}\n"
-        f"// #generated: {now}\n"
-        f"// #mode: {mode} | candidates: {n_total} "
-        f"(SOCKS5:{n_socks} HTTP:{n_http}) verified:{n_ver}\n"
-    )
-
-    body = json.dumps(config, indent=2, ensure_ascii=False)
-
     with open(path, "w", encoding="utf-8") as f:
-        # Write real // comment lines (not inside JSON — before the { )
-        f.write(f"// #profile-title: {title}\n")
-        f.write(f"// #profile-update-interval: {interval}\n")
-        f.write(f"// #generated: {now}\n")
-        f.write(f"// #mode: {mode} | candidates:{n_total} "
-                f"SOCKS5:{n_socks} HTTP:{n_http} verified:{n_ver}\n")
-        f.write(body)
+        json.dump(config, f, indent=2, ensure_ascii=False)
 
     log(f"  [hiddify] {path} — {n_total} proxies "
         f"(SOCKS5:{n_socks} HTTP:{n_http} verified:{n_ver})")
