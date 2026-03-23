@@ -2,13 +2,20 @@ name: Iran Proxy Checker
 
 on:
   schedule:
-    - cron: "30 20 * * *"   # 20:30 UTC = 01:00 Tehran / 12:30 Vancouver
+    - cron: "30 20 * * *"   # 20:30 UTC = 00:00 Tehran (IRST+3:30) / 12:30 Vancouver
   workflow_dispatch:
+    inputs:
+      scan_workers:
+        description: "Concurrent TCP scan workers (default 2000)"
+        default: "2000"
+      scan_tcp_to:
+        description: "TCP scan timeout in seconds (default 0.5)"
+        default: "0.5"
 
 jobs:
   collect-proxies:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30        # scan adds ~2 min; give plenty of headroom
     permissions:
       contents: write
 
@@ -22,10 +29,13 @@ jobs:
       - name: Install dependencies
         run: pip install requests pysocks
 
-      - name: Collect Iranian proxy candidates
+      - name: Collect + scan Iranian proxy candidates
         run: python check_proxies.py
         env:
-          COLLECT_ONLY: "1"   # Azure can't reach Iranian IPs — collect & save only
+          COLLECT_ONLY: "1"          # Azure can't reach Iranian IPs for live test
+          FRESH_HOURS: "72"
+          SCAN_WORKERS: ${{ github.event.inputs.scan_workers || '2000' }}
+          SCAN_TCP_TO: ${{ github.event.inputs.scan_tcp_to || '0.5' }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -34,12 +44,13 @@ jobs:
           path: |
             working_iran_proxies.txt
             working_iran_proxies.json
+            merged_routable_asns.json
           retention-days: 7
 
       - name: Commit results
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add working_iran_proxies.txt working_iran_proxies.json
+          git add working_iran_proxies.txt working_iran_proxies.json merged_routable_asns.json
           git diff --cached --quiet || git commit -m "chore: update proxies $(date -u +'%Y-%m-%d %H:%M UTC')"
           git push
