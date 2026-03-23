@@ -4,59 +4,61 @@ Iran Proxy Checker — Active CIDR Scanner Edition
 =================================================
 Two-phase approach:
 
-PHASE 1 — Passive collection (existing aggregators)
-  Fetch from geonode, proxyscrape, proxifly, openray etc. and keep only
-  IPs on globally-routable Iranian ASNs (merged_routable_asns.json).
+PHASE 1 — Passive collection
+  Fetch from geonode, proxyscrape, proxifly, openray etc.
+  Keep only IPs on globally-routable Iranian ASNs.
 
-PHASE 2 — Active CIDR scan  ← the key new addition
-  Sample IPs directly from the routable Iranian CIDRs and TCP-probe common
-  proxy ports.  This finds proxies that no aggregator knows about.
+PHASE 2 — Active CIDR scan
+  Sample IPs directly from routable Iranian CIDRs and TCP-probe
+  common proxy ports. Finds proxies aggregators never publish.
 
-  Strategy: for each /24 block in the routable CIDRs, probe 6 representative
-  IPs (.1 .10 .100 .150 .200 .254) on 11 common proxy ports.
-  ~386k IP:port pairs, 2000 concurrent workers → completes in ~2 minutes.
-
-PHASE 3 — Live test
-  Test all surviving candidates (passive + active) from your network.
+  Target budget: ~1.35M probes (3 IPs × 7 ports per /24 block)
+  At 2000 workers / 0.5s timeout → ~6 minutes.
 """
 
-import ipaddress
-import os
-import socket
-import requests
-import concurrent.futures
-import json
-import re
-import time
-import random
+import ipaddress, os, socket, requests, concurrent.futures
+import json, re, time, random
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-COLLECT_ONLY    = os.environ.get("COLLECT_ONLY", "").strip() == "1"
-FRESH_HOURS     = int(os.environ.get("FRESH_HOURS", "72"))
-SCRAPE_TIMEOUT  = 12
-TCP_TIMEOUT     = 8
-HTTP_TIMEOUT    = 20
-MAX_WORKERS     = 60        # for live proxy test
-SCAN_WORKERS    = int(os.environ.get("SCAN_WORKERS", "2000"))  # for CIDR scan
-SCAN_TCP_TO     = float(os.environ.get("SCAN_TCP_TO", "0.5"))  # seconds
+COLLECT_ONLY   = os.environ.get("COLLECT_ONLY", "").strip() == "1"
+FRESH_HOURS    = int(os.environ.get("FRESH_HOURS", "72"))
+SCRAPE_TIMEOUT = 12
+TCP_TIMEOUT    = 8
+HTTP_TIMEOUT   = 20
+MAX_WORKERS    = 60
+SCAN_WORKERS   = int(os.environ.get("SCAN_WORKERS", "2000"))
+SCAN_TCP_TO    = float(os.environ.get("SCAN_TCP_TO", "0.5"))
 
-# Ports most commonly used by open proxies
-PROXY_PORTS = [1080, 3128, 8080, 8088, 8118, 8443, 8888, 9090, 9999, 80, 443]
+# 3 IPs × 7 ports = 21 probes per /24 block → ~1.35M total, ~6min
+SAMPLE_OFFSETS = [1, 100, 200]
+PROXY_PORTS    = [1080, 3128, 8080, 8088, 8118, 8888, 9999]
 
-# How many IPs to probe per /24 block in the routable CIDRs
-# Offsets within each /24 (avoids .0 broadcast and .255)
-SAMPLE_OFFSETS = [1, 10, 50, 100, 150, 200]   # 6 IPs × 11 ports = 66 probes/block
-
-ASN_JSON_PATH = Path(__file__).parent / "merged_routable_asns.json"
+ASN_JSON_PATH  = Path(__file__).parent / "merged_routable_asns.json"
 
 REACHABLE_ASNS = [
-    "AS43754",  "AS62229",  "AS48159",  "AS12880",  "AS16322",
-    "AS42337",  "AS49666",  "AS24631",  "AS56402",  "AS31549",
-    "AS44244",  "AS197207", "AS58224",  "AS39501",  "AS57218",
-    "AS25184",  "AS51695",  "AS47262",
+    "AS43754",   # Asiatech Data Transmission — telewebion.ir
+    "AS64422",   # Sima Rayan Sharif — telewebion.ir (current IP)  ← new
+    "AS62229",   # Fars News Agency — farsnews.ir
+    "AS48159",   # TIC / ITC Backbone
+    "AS12880",   # Iran Telecommunications Co.
+    "AS16322",   # Pars Online / Respina
+    "AS42337",   # Respina Networks & Beyond
+    "AS49666",   # TIC Gateway (transit for all Iranian ISPs)
+    "AS21341",   # Fanava Group — sepehrtv.ir (current IP)         ← new
+    "AS24631",   # FANAPTELECOM / Fanavari Pasargad
+    "AS56402",   # Dadeh Gostar Asr Novin
+    "AS31549",   # Afranet
+    "AS44244",   # IranCell / MCI
+    "AS197207",  # Mobile Communication of Iran (MCI)
+    "AS58224",   # Iran Telecom PJS
+    "AS39501",   # Aria Shatel
+    "AS57218",   # RayaPars
+    "AS25184",   # Afagh Danesh Gostar
+    "AS51695",   # Iranian ISP
+    "AS47262",   # Iranian ISP
 ]
 
 TEST_URLS = [
@@ -93,8 +95,7 @@ CUTOFF  = NOW_UTC - timedelta(hours=FRESH_HOURS)
 
 
 def log(msg):
-    ts = NOW_UTC.strftime("%H:%M:%S")
-    print(f"[{ts}] {msg}", flush=True)
+    print(f"[{NOW_UTC.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
 # ── ASN / prefix loading ──────────────────────────────────────────────────────
@@ -118,39 +119,55 @@ def fetch_asn_prefixes_bgpview(asn: str) -> list:
         return [p["prefix"] for p in
                 r.json().get("data", {}).get("ipv4_prefixes", [])
                 if p.get("prefix")]
+    except requests.exceptions.ConnectionError:
+        return []   # silently skip — DNS blocked on this runner
     except Exception as e:
         log(f"  ! BGPView {asn}: {e}")
         return []
 
 
 def refresh_json_from_bgpview(existing: dict) -> dict:
-    log(f"  Refreshing {len(REACHABLE_ASNS)} ASNs from BGPView…")
+    """
+    Refresh ASN prefixes from BGPView. Merges new entries on top of JSON.
+    Runs silently if BGPView is unreachable (e.g. blocked on GitHub Actions).
+    """
+    bgpview_ok = False
     updated = {}
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
         futures = {ex.submit(fetch_asn_prefixes_bgpview, asn): asn
                    for asn in REACHABLE_ASNS}
         for future in concurrent.futures.as_completed(futures):
             asn = futures[future]
             try:
-                new_p    = set(future.result())
+                new_p     = set(future.result())
                 old_entry = existing.get(asn, {})
-                old_p    = set(old_entry.get("prefixes", []))
-                merged   = sorted(old_p | new_p)
+                old_p     = set(old_entry.get("prefixes", []))
+                merged    = sorted(old_p | new_p)
                 updated[asn] = {"name": old_entry.get("name", asn),
                                  "prefixes": merged}
-                delta = len(merged) - len(old_p)
-                log(f"    {asn:<12} {len(merged):>4} prefixes "
-                    f"({'+'  if delta >= 0 else ''}{delta})")
-            except Exception as e:
-                log(f"    {asn}: error — {e}")
+                if new_p:
+                    bgpview_ok = True
+                    delta = len(merged) - len(old_p)
+                    log(f"    {asn:<12} {len(merged):>4} prefixes "
+                        f"({'+'  if delta >= 0 else ''}{delta})")
+                else:
+                    # No new data — keep existing silently
+                    pass
+            except Exception:
                 if asn in existing:
                     updated[asn] = existing[asn]
-    if updated:
+
+    if bgpview_ok:
+        log(f"  BGPView refresh complete")
         try:
             with open(ASN_JSON_PATH, "w") as f:
                 json.dump(updated, f, indent=2, ensure_ascii=False)
         except Exception as e:
             log(f"  ! Could not write {ASN_JSON_PATH.name}: {e}")
+    else:
+        log(f"  BGPView unreachable — using JSON data only")
+
     return updated if updated else existing
 
 
@@ -170,13 +187,17 @@ def build_network_list(asn_data: dict) -> list:
 
 
 def load_routable_networks() -> tuple:
-    log("  Loading from JSON…")
     asn_data = load_from_json()
     if asn_data:
         total = sum(len(v.get("prefixes", [])) for v in asn_data.values())
-        log(f"  {total} prefixes across {len(asn_data)} ASNs from "
-            f"{ASN_JSON_PATH.name}")
+        log(f"  {total} prefixes across {len(asn_data)} ASNs "
+            f"from {ASN_JSON_PATH.name}")
+    else:
+        log(f"  {ASN_JSON_PATH.name} not found — will build from BGPView")
+
+    log(f"  Refreshing from BGPView ({len(REACHABLE_ASNS)} ASNs)…")
     asn_data = refresh_json_from_bgpview(asn_data)
+
     if asn_data:
         nets = build_network_list(asn_data)
         log(f"  Final: {len(nets)} unique prefixes")
@@ -197,37 +218,30 @@ def load_routable_networks() -> tuple:
 
 def generate_scan_targets(networks: list) -> list:
     """
-    For every /24 block within each routable network, emit
-    (ip_str, port) pairs for each SAMPLE_OFFSET × PROXY_PORT combination.
-
-    Larger blocks are broken into /24 chunks.
-    The list is shuffled so the scan doesn't hammer one subnet sequentially.
+    For every /24 block in the routable networks, emit
+    (ip, port) pairs for SAMPLE_OFFSETS × PROXY_PORTS.
+    Total = /24_block_count × len(SAMPLE_OFFSETS) × len(PROXY_PORTS)
     """
     targets = []
     for net in networks:
-        # Iterate over /24 sub-blocks
-        if net.prefixlen <= 24:
-            subnets = net.subnets(new_prefix=24)
-        else:
-            subnets = [net]
-
+        subnets = list(net.subnets(new_prefix=24)) if net.prefixlen <= 24 else [net]
         for subnet in subnets:
-            base = int(subnet.network_address)
-            max_host = subnet.num_addresses - 1
+            base    = int(subnet.network_address)
+            max_off = subnet.num_addresses - 1
             for offset in SAMPLE_OFFSETS:
-                if offset >= max_host:
+                if offset >= max_off:
                     continue
-                ip_int = base + offset
-                ip_str = str(ipaddress.IPv4Address(ip_int))
+                ip_str = str(ipaddress.IPv4Address(base + offset))
                 for port in PROXY_PORTS:
                     targets.append((ip_str, port))
 
     random.shuffle(targets)
+    log(f"  Generated {len(targets):,} scan targets "
+        f"({len(SAMPLE_OFFSETS)} IPs × {len(PROXY_PORTS)} ports per /24)")
     return targets
 
 
 def tcp_probe(args) -> tuple | None:
-    """Return (ip, port) if TCP connect succeeds within SCAN_TCP_TO seconds."""
     ip, port = args
     try:
         with socket.create_connection((ip, port), timeout=SCAN_TCP_TO):
@@ -237,15 +251,11 @@ def tcp_probe(args) -> tuple | None:
 
 
 def scan_routable_cidrs(networks: list) -> set:
-    """
-    TCP-scan the routable CIDRs for open proxy ports.
-    Returns set of "ip:port" strings that accepted a TCP connection.
-    """
     targets = generate_scan_targets(networks)
     total   = len(targets)
-    log(f"  Generated {total:,} scan targets "
-        f"({len(SAMPLE_OFFSETS)} IPs × {len(PROXY_PORTS)} ports per /24)")
-    log(f"  Scanning with {SCAN_WORKERS} workers, {SCAN_TCP_TO}s timeout…")
+    est_min = total / (SCAN_WORKERS / SCAN_TCP_TO) / 60
+    log(f"  Scanning with {SCAN_WORKERS} workers, {SCAN_TCP_TO}s timeout "
+        f"(est. {est_min:.1f} min)…")
 
     open_ports: set = set()
     done = 0
@@ -255,23 +265,20 @@ def scan_routable_cidrs(networks: list) -> set:
         for result in ex.map(tcp_probe, targets, chunksize=500):
             done += 1
             if result:
-                ip, port = result
-                open_ports.add(f"{ip}:{port}")
-            if done % 50000 == 0:
+                open_ports.add(f"{result[0]}:{result[1]}")
+            if done % 100_000 == 0:
                 elapsed = time.monotonic() - t0
                 rate    = done / elapsed
                 eta     = (total - done) / rate if rate > 0 else 0
-                log(f"  … {done:,}/{total:,} scanned | "
-                    f"open: {len(open_ports)} | "
-                    f"{rate:.0f}/s | ETA {eta:.0f}s")
+                log(f"  … {done:,}/{total:,} | open: {len(open_ports)} "
+                    f"| {rate:.0f}/s | ETA {eta:.0f}s")
 
     elapsed = time.monotonic() - t0
-    log(f"  Scan complete in {elapsed:.1f}s — "
-        f"{len(open_ports)} open ports found")
+    log(f"  Scan complete in {elapsed:.1f}s — {len(open_ports)} open ports")
     return open_ports
 
 
-# ── ASN filter ────────────────────────────────────────────────────────────────
+# ── Filters & helpers ─────────────────────────────────────────────────────────
 
 def in_routable(ip: str, networks: list) -> bool:
     try:
@@ -284,14 +291,11 @@ def in_routable(ip: str, networks: list) -> bool:
 def asn_filter(candidates: set, networks: list) -> set:
     log(f"ASN-filtering {len(candidates)} candidates…")
     t = time.monotonic()
-    result = {p for p in candidates
-              if in_routable(p.split(":")[0], networks)}
+    result = {p for p in candidates if in_routable(p.split(":")[0], networks)}
     log(f"  → {len(result)} on routable Iranian ASNs "
-        f"({round(time.monotonic()-t, 2)}s)")
+        f"({round(time.monotonic()-t, 1)}s)")
     return result
 
-
-# ── Site probe → auto-discover new ASNs ──────────────────────────────────────
 
 def probe_sites_and_discover(networks: list) -> list:
     log("\n── Probing known-reachable Iranian sites ──")
@@ -304,40 +308,40 @@ def probe_sites_and_discover(networks: list) -> list:
             if matched:
                 log(f"  ✓ {site:<22} {ip:<18} → {matched[0]}")
             else:
-                info = requests.get(
-                    f"https://ipinfo.io/{ip}/json",
-                    headers=HEADERS, timeout=8
-                ).json()
-                asn_str = info.get("org", "").split()[0]
-                country = info.get("country", "")
-                if country != "IR":
-                    log(f"  - {site:<22} {ip:<18} → {asn_str} "
-                        f"({country}) — CDN/split-horizon, skipping")
-                else:
-                    log(f"  ? {site:<22} {ip:<18} → {asn_str} "
-                        f"— new Iranian ASN, fetching prefixes…")
-                    new_p = fetch_asn_prefixes_bgpview(asn_str)
-                    if new_p:
-                        extra.extend([ipaddress.IPv4Network(p, strict=False)
-                                       for p in new_p])
-                        log(f"    ↳ added {len(new_p)} prefixes for {asn_str}")
+                try:
+                    info    = requests.get(f"https://ipinfo.io/{ip}/json",
+                                           headers=HEADERS, timeout=8).json()
+                    asn_str = info.get("org", "").split()[0]
+                    country = info.get("country", "")
+                    if country != "IR":
+                        log(f"  - {site:<22} {ip:<18} → {asn_str} "
+                            f"({country}) — CDN/split-horizon")
+                    else:
+                        log(f"  ? {site:<22} {ip:<18} → {asn_str} "
+                            f"— new Iranian ASN, fetching prefixes…")
+                        new_p = fetch_asn_prefixes_bgpview(asn_str)
+                        if new_p:
+                            extra.extend([
+                                ipaddress.IPv4Network(p, strict=False)
+                                for p in new_p
+                            ])
+                            log(f"    ↳ added {len(new_p)} prefixes for {asn_str}")
+                        else:
+                            log(f"    ↳ BGPView unreachable — add {asn_str} "
+                                f"to REACHABLE_ASNS manually")
+                except Exception:
+                    pass
         except OSError:
             log(f"  - {site:<22} (DNS failed)")
-        except Exception as e:
-            log(f"  - {site:<22} error: {e}")
     return extra
 
-
-# ── Freshness helpers ─────────────────────────────────────────────────────────
 
 def is_fresh(ts_str: str) -> bool:
     if not ts_str:
         return False
-    for fmt in (
-        "%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ",
-        "%Y-%m-%dT%H:%M:%S+00:00", "%Y-%m-%d %H:%M:%S",
-        "%Y-%m-%dT%H:%M:%S",
-    ):
+    for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ",
+                "%Y-%m-%dT%H:%M:%S+00:00", "%Y-%m-%d %H:%M:%S",
+                "%Y-%m-%dT%H:%M:%S"):
         try:
             dt = datetime.strptime(ts_str[:26], fmt).replace(tzinfo=timezone.utc)
             return dt >= CUTOFF
@@ -381,9 +385,12 @@ def fetch_geonode_fresh():
                 ip    = p.get("ip", "")
                 ts    = (p.get("updatedAt") or p.get("lastChecked")
                          or p.get("created_at", ""))
-                ports = p.get("port", [])
-                if isinstance(ports, (int, str)):
-                    ports = [ports]
+                # port can be int, str, or list — normalise
+                port_raw = p.get("port", [])
+                if isinstance(port_raw, list):
+                    ports = [str(x) for x in port_raw]
+                else:
+                    ports = [str(port_raw)]
                 for port in ports:
                     proxy = f"{ip}:{port}"
                     total += 1
@@ -409,9 +416,17 @@ def fetch_proxyscrape_fresh():
             body = r.text.strip()
             if not body:
                 continue
-            for p in r.json().get("proxies", []):
-                proxy = p.get("proxy", "")
-                ts    = p.get("last_seen", "") or p.get("added", "")
+            data = r.json()
+            # API may return {"proxies": [...]} or a list directly
+            proxy_list = data if isinstance(data, list) else data.get("proxies", [])
+            for p in proxy_list:
+                if isinstance(p, str):
+                    proxy, ts = p, ""
+                elif isinstance(p, dict):
+                    proxy = p.get("proxy", "")
+                    ts    = p.get("last_seen", "") or p.get("added", "")
+                else:
+                    continue
                 total += 1
                 if proxy and is_fresh(ts):
                     kept += 1
@@ -600,53 +615,49 @@ def main():
     log("=" * 60)
     mode = "COLLECT-ONLY" if COLLECT_ONLY else "FULL TEST"
     log(f"Iran Proxy Checker — Active CIDR Scanner Edition [{mode}]")
-    log(f"Freshness window: {FRESH_HOURS}h | "
-        f"Scan workers: {SCAN_WORKERS} | TCP timeout: {SCAN_TCP_TO}s")
+    log(f"Freshness: {FRESH_HOURS}h | Scan: {SCAN_WORKERS}w/{SCAN_TCP_TO}s | "
+        f"Probes/block: {len(SAMPLE_OFFSETS)}×{len(PROXY_PORTS)}={len(SAMPLE_OFFSETS)*len(PROXY_PORTS)}")
     log("=" * 60)
 
-    # ── Load routable prefix allowlist ────────────────────────────────────────
     log("\n── Loading routable Iranian ASN prefixes ──")
     routable_networks, asn_data = load_routable_networks()
 
-    # Auto-discover new ASNs from probe sites
     extra = probe_sites_and_discover(routable_networks)
     if extra:
         routable_networks = list(
             {str(n): n for n in routable_networks + extra}.values()
         )
-        log(f"  Updated: {len(routable_networks)} prefixes total")
+        log(f"  Updated: {len(routable_networks)} prefixes")
 
-    # ── Phase 1: Passive aggregator collection ────────────────────────────────
-    passive_info = collect_passive_candidates()
-
-    # ASN-filter passive candidates
+    # Phase 1
+    passive_info     = collect_passive_candidates()
     passive_routable = asn_filter(set(passive_info.keys()), routable_networks)
-    log(f"  Passive candidates surviving ASN filter: {len(passive_routable)}")
+    log(f"  Passive after ASN filter: {len(passive_routable)}")
 
-    # ── Phase 2: Active CIDR scan ─────────────────────────────────────────────
+    # Phase 2
     log(f"\n── Phase 2: Active CIDR scan ──")
     scan_hits = scan_routable_cidrs(routable_networks)
-    log(f"  Active scan found {len(scan_hits)} open TCP ports on Iranian ASNs")
 
-    # ── Merge passive + active ────────────────────────────────────────────────
+    # Merge
     all_proxies: dict = {}
-
     for p in passive_routable:
         cp = clean_proxy(p)
         if cp:
             all_proxies[cp] = passive_info.get(p, {"ts": "", "source": "passive"})
-
     for p in scan_hits:
         cp = clean_proxy(p)
         if cp and cp not in all_proxies:
             all_proxies[cp] = {"ts": "scan_live", "source": "active_scan"}
 
-    log(f"\n  Combined candidates: {len(all_proxies)} "
-        f"({len(passive_routable)} passive + "
-        f"{len(scan_hits) - (len(scan_hits) & len(passive_routable))} new from scan)")
+    new_from_scan = len(scan_hits) - sum(
+        1 for p in scan_hits if clean_proxy(p) in
+        {clean_proxy(q) for q in passive_routable}
+    )
+    log(f"\n  Combined: {len(all_proxies)} "
+        f"({len(passive_routable)} passive + {new_from_scan} new from scan)")
 
     if not all_proxies:
-        log("ERROR: No candidates from either passive or active phase.")
+        log("ERROR: No candidates from either phase.")
         return
 
     from collections import Counter
@@ -655,14 +666,14 @@ def main():
     for src, cnt in src_counts.most_common():
         log(f"    {src:<25} {cnt}")
 
-    # ── Phase 3: Live test ────────────────────────────────────────────────────
+    # Phase 3: live test
     working = []
     tcp_ok = tcp_refused = tcp_timeout_count = 0
 
     if COLLECT_ONLY:
         log(f"\n── COLLECT-ONLY: {len(all_proxies)} candidates saved ──")
     else:
-        log(f"\n── Phase 3: Live testing {len(all_proxies)} proxies "
+        log(f"\n── Phase 3: Live testing {len(all_proxies)} "
             f"({MAX_WORKERS} threads) ──\n")
         all_results = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
@@ -679,13 +690,10 @@ def main():
                 if done % 100 == 0:
                     ok = sum(1 for r in all_results if r["tcp"] == "ok")
                     wk = sum(1 for r in all_results if r.get("working"))
-                    log(f"  … {done}/{len(all_proxies)} | "
-                        f"TCP-ok:{ok} | working:{wk}")
+                    log(f"  … {done}/{len(all_proxies)} | TCP-ok:{ok} | working:{wk}")
 
-        working = sorted(
-            [r for r in all_results if r.get("working")],
-            key=lambda x: x["latency_ms"],
-        )
+        working = sorted([r for r in all_results if r.get("working")],
+                         key=lambda x: x["latency_ms"])
         tcp_ok            = sum(1 for r in all_results if r["tcp"] == "ok")
         tcp_refused       = sum(1 for r in all_results if r["tcp"] == "refused")
         tcp_timeout_count = sum(1 for r in all_results if r["tcp"] == "timeout")
@@ -694,7 +702,6 @@ def main():
         for p in working:
             proto_counts[p["protocol"]] = proto_counts.get(p["protocol"], 0) + 1
         breakdown = "  ".join(f"{k}:{v}" for k, v in sorted(proto_counts.items()))
-
         log(f"\n{'='*60}")
         log(f"total={len(all_proxies)}  tcp-ok={tcp_ok}  "
             f"refused={tcp_refused}  timeout={tcp_timeout_count}  "
@@ -703,11 +710,11 @@ def main():
             log(f"Protocol breakdown: {breakdown}")
         log(f"{'='*60}\n")
 
-    # ── Save ──────────────────────────────────────────────────────────────────
+    # Save
     now = NOW_UTC.strftime("%Y-%m-%d %H:%M UTC")
     out = Path("working_iran_proxies.txt")
-    priority_order = ["active_scan", "geonode", "proxyscrape", "openray",
-                      "proxifly", "ir_targeted"]
+    priority_order = ["active_scan","geonode","proxyscrape","openray",
+                      "proxifly","ir_targeted"]
 
     def sort_key(proxy):
         src = all_proxies[proxy]["source"]
@@ -719,7 +726,7 @@ def main():
     with open(out, "w") as f:
         f.write(f"# Iranian Proxies — Active CIDR Scanner — {now}\n")
         f.write(f"# Mode: {mode} | Freshness: {FRESH_HOURS}h\n")
-        f.write(f"# Routable prefixes: {len(routable_networks)} | "
+        f.write(f"# Prefixes: {len(routable_networks)} | "
                 f"Scan hits: {len(scan_hits)} | "
                 f"Total candidates: {len(all_proxies)}\n")
         f.write(f"# Verified: {len(working)}")
@@ -727,7 +734,6 @@ def main():
             f.write(f" | TCP: ok={tcp_ok} refused={tcp_refused} "
                     f"timeout={tcp_timeout_count}")
         f.write("\n#\n\n")
-
         if working:
             f.write("# === LIVE-VERIFIED WORKING PROXIES ===\n\n")
             for p in working:
@@ -739,35 +745,31 @@ def main():
                 f.write(f"{p['proxy']}\n")
         else:
             f.write("# === ALL CANDIDATES (unverified) ===\n\n")
-
         f.write("\n# === ALL CANDIDATES (unverified) ===\n\n")
         for proxy in sorted(all_proxies, key=sort_key):
-            info = all_proxies[proxy]
-            ts_str = (
-                f"  last_seen: {info['ts']}"
-                if info.get("ts") and info["ts"] not in
-                ("", "repo_fresh", "ir_targeted", "fresh_5min",
-                 "scan_live", "passive")
-                else ""
-            )
+            info   = all_proxies[proxy]
+            ts_str = (f"  last_seen: {info['ts']}"
+                      if info.get("ts") and info["ts"] not in
+                      ("","repo_fresh","ir_targeted","fresh_5min",
+                       "scan_live","passive")
+                      else "")
             f.write(f"{proxy:<26}  # {info['source']}{ts_str}\n")
 
     jp = Path("working_iran_proxies.json")
     with open(jp, "w") as f:
         json.dump({
-            "checked_at"         : now,
-            "fresh_hours"        : FRESH_HOURS,
-            "mode"               : mode,
-            "routable_prefixes"  : len(routable_networks),
-            "passive_candidates" : len(passive_routable),
-            "scan_hits"          : len(scan_hits),
-            "total_candidates"   : len(all_proxies),
-            "verified_count"     : len(working),
-            "tcp_stats"          : {"ok": tcp_ok, "refused": tcp_refused,
-                                    "timeout": tcp_timeout_count},
-            "source_counts"      : dict(src_counts),
-            "verified"           : working,
-            "all_candidates"     : [
+            "checked_at"        : now,
+            "mode"              : mode,
+            "routable_prefixes" : len(routable_networks),
+            "passive_candidates": len(passive_routable),
+            "scan_hits"         : len(scan_hits),
+            "total_candidates"  : len(all_proxies),
+            "verified_count"    : len(working),
+            "tcp_stats"         : {"ok": tcp_ok, "refused": tcp_refused,
+                                   "timeout": tcp_timeout_count},
+            "source_counts"     : dict(src_counts),
+            "verified"          : working,
+            "all_candidates"    : [
                 {"proxy": p, "source": all_proxies[p]["source"],
                  "ts": all_proxies[p]["ts"]}
                 for p in sorted(all_proxies, key=sort_key)
