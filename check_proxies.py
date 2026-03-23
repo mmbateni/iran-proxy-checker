@@ -841,6 +841,222 @@ def main():
 
     log(f"Saved → {out} / {jp}")
 
+    # Save Hiddify / sing-box importable JSON
+    save_hiddify_json(all_proxies, working, now, mode, len(scan_hits))
+    log(f"Saved → hiddify_iran_proxies.json")
+
+
+
+# ── Hiddify / sing-box JSON builder ──────────────────────────────────────────
+
+# Port → protocol inference table.
+# Sources like ercindedeoglu_s5 are always SOCKS; ercindedeoglu_http always HTTP.
+# For active_scan candidates we infer from the port number.
+HTTP_PORTS  = {80, 81, 514, 3128, 8000, 8080, 8081, 8082, 8083, 8085,
+               8086, 8088, 8118, 8383, 8888}
+SOCKS_PORTS = {1028, 1080, 3698, 5678, 6030, 6565, 6888, 7060, 7768,
+               8443, 9090, 9999, 18614, 21268, 32650, 35408, 55555}
+HTTP_SOURCES  = {"ercindedeoglu_http", "proxydb_http", "ir_targeted"}
+SOCKS_SOURCES = {"ercindedeoglu_s5",  "vakhov_s5"}
+
+
+def _infer_protocol(proxy: str, source: str) -> str:
+    """Return 'http' or 'socks5' based on source tag and port."""
+    if source in HTTP_SOURCES:
+        return "http"
+    if source in SOCKS_SOURCES:
+        return "socks5"
+    port = int(proxy.rsplit(":", 1)[1])
+    if port in HTTP_PORTS:
+        return "http"
+    # Default: SOCKS5 (most common on open Iranian IPs)
+    return "socks5"
+
+
+def build_hiddify_singbox(all_proxies: dict, working: list,
+                          now: str, mode: str,
+                          scan_hits: int, total_candidates: int) -> dict:
+    """
+    Build a sing-box JSON config compatible with Hiddify.
+
+    Structure:
+      - One outbound per candidate (socks or http)
+      - 'selector'  outbound → manual pick in Hiddify UI
+      - 'auto'      outbound → urltest auto-select by latency
+      - 'direct', 'block', 'dns-out' mandatory outbounds
+      - Minimal DNS + route that works out of the box
+    """
+    outbounds = []
+    tags_socks = []
+    tags_http  = []
+    tags_all   = []
+
+    # Prefer verified proxies first, then all candidates
+    if working:
+        ordered = [r["proxy"] for r in working] +                   [p for p in all_proxies if p not in {r["proxy"] for r in working}]
+    else:
+        priority = ["active_scan","geonode","proxyscrape","openray","proxifly"]
+        def _sk(p):
+            src = all_proxies[p]["source"]
+            try:    return priority.index(src)
+            except: return len(priority)
+        ordered = sorted(all_proxies, key=_sk)
+
+    for idx, proxy in enumerate(ordered):
+        info     = all_proxies[proxy]
+        source   = info.get("source", "")
+        protocol = _infer_protocol(proxy, source)
+        ip, port_str = proxy.rsplit(":", 1)
+        port     = int(port_str)
+        tag      = f"{protocol}-{ip}:{port}"   # unique, human-readable
+
+        if protocol == "http":
+            outbounds.append({
+                "type"        : "http",
+                "tag"         : tag,
+                "server"      : ip,
+                "server_port" : port,
+            })
+            tags_http.append(tag)
+        else:
+            outbounds.append({
+                "type"        : "socks",
+                "tag"         : tag,
+                "server"      : ip,
+                "server_port" : port,
+                "version"     : "5",
+            })
+            tags_socks.append(tag)
+
+        tags_all.append(tag)
+
+    if not tags_all:
+        return {}
+
+    # auto urltest — Hiddify picks the fastest automatically
+    outbounds.append({
+        "type"      : "urltest",
+        "tag"       : "auto",
+        "outbounds" : tags_all,
+        "url"       : "https://www.gstatic.com/generate_204",
+        "interval"  : "3m",
+        "tolerance" : 50,
+    })
+
+    # selector — user can pick manually in Hiddify
+    selector_outs = ["auto"] + tags_all
+    outbounds.append({
+        "type"      : "selector",
+        "tag"       : "proxy",
+        "outbounds" : selector_outs,
+        "default"   : "auto",
+    })
+
+    # Mandatory sing-box outbounds
+    outbounds += [
+        {"type": "direct", "tag": "direct"},
+        {"type": "block",  "tag": "block"},
+        {"type": "dns",    "tag": "dns-out"},
+    ]
+
+    config = {
+        "log": {
+            "level"     : "warn",
+            "timestamp" : True,
+        },
+        "dns": {
+            "servers": [
+                {
+                    "tag"    : "remote",
+                    "address": "https://1.1.1.1/dns-query",
+                    "detour" : "proxy",
+                },
+                {
+                    "tag"    : "local",
+                    "address": "local",
+                    "detour" : "direct",
+                },
+            ],
+            "rules": [
+                {"outbound": "any", "server": "local"},
+            ],
+            "final"    : "remote",
+            "strategy" : "ipv4_only",
+        },
+        "outbounds": outbounds,
+        "route": {
+            "rules": [
+                {"protocol": "dns",          "outbound": "dns-out"},
+                {"ip_is_private": True,      "outbound": "direct"},
+            ],
+            "final"                 : "proxy",
+            "auto_detect_interface" : True,
+        },
+        # Hiddify-specific metadata (read from first 10 lines as // comments)
+        "_hiddify_meta": {
+            "profile_title"           : "Iran Proxies — Active Scan",
+            "profile_update_interval" : 24,
+            "generated_at"            : now,
+            "mode"                    : mode,
+            "total_candidates"        : total_candidates,
+            "scan_hits"               : scan_hits,
+            "verified_count"          : len(working),
+            "socks5_count"            : len(tags_socks),
+            "http_count"              : len(tags_http),
+        },
+    }
+    return config
+
+
+def save_hiddify_json(all_proxies: dict, working: list,
+                      now: str, mode: str,
+                      scan_hits: int) -> None:
+    """
+    Write hiddify_iran_proxies.json — a valid sing-box config importable
+    directly into Hiddify via URL (raw GitHub link) or local file.
+
+    The first lines use // comments which Hiddify reads as profile metadata
+    before parsing the JSON body.
+    """
+    config = build_hiddify_singbox(
+        all_proxies, working, now, mode, scan_hits, len(all_proxies)
+    )
+    if not config:
+        log("  [hiddify] No candidates — skipping Hiddify JSON")
+        return
+
+    path = Path("hiddify_iran_proxies.json")
+
+    # Hiddify profile headers (// lines, read before JSON parsing)
+    meta     = config.pop("_hiddify_meta", {})
+    title    = meta.get("profile_title", "Iran Proxies")
+    interval = meta.get("profile_update_interval", 24)
+    n_socks  = meta.get("socks5_count", 0)
+    n_http   = meta.get("http_count", 0)
+    n_total  = meta.get("total_candidates", 0)
+    n_ver    = meta.get("verified_count", 0)
+
+    header = (
+        f"// #profile-title: {title}\n"
+        f"// #profile-update-interval: {interval}\n"
+        f"// #generated: {now}\n"
+        f"// #mode: {mode} | candidates: {n_total} "
+        f"(SOCKS5:{n_socks} HTTP:{n_http}) verified:{n_ver}\n"
+    )
+
+    body = json.dumps(config, indent=2, ensure_ascii=False)
+
+    with open(path, "w", encoding="utf-8") as f:
+        # Write real // comment lines (not inside JSON — before the { )
+        f.write(f"// #profile-title: {title}\n")
+        f.write(f"// #profile-update-interval: {interval}\n")
+        f.write(f"// #generated: {now}\n")
+        f.write(f"// #mode: {mode} | candidates:{n_total} "
+                f"SOCKS5:{n_socks} HTTP:{n_http} verified:{n_ver}\n")
+        f.write(body)
+
+    log(f"  [hiddify] {path} — {n_total} proxies "
+        f"(SOCKS5:{n_socks} HTTP:{n_http} verified:{n_ver})")
 
 if __name__ == "__main__":
     main()
