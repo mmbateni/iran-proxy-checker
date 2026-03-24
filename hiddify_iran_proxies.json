@@ -28,15 +28,15 @@
   "outbounds": [
     {
       "type": "http",
-      "tag": "http-185.112.32.75:8080",
-      "server": "185.112.32.75",
+      "tag": "http-5.120.0.25:8080",
+      "server": "5.120.0.25",
       "server_port": 8080
     },
     {
       "type": "http",
-      "tag": "http-5.120.0.25:8080",
-      "server": "5.120.0.25",
-      "server_port": 8080
+      "tag": "http-5.115.0.10:80",
+      "server": "5.115.0.10",
+      "server_port": 80
     },
     {
       "type": "http",
@@ -46,9 +46,9 @@
     },
     {
       "type": "http",
-      "tag": "http-5.115.0.10:80",
-      "server": "5.115.0.10",
-      "server_port": 80
+      "tag": "http-185.112.32.75:8080",
+      "server": "185.112.32.75",
+      "server_port": 8080
     },
     {
       "type": "direct",
@@ -75,10 +75,10 @@
   },
   "_info": {
     "profile_title": "Iran Proxies \u2014 Verified",
-    "generated_at": "2026-03-24 19:18 UTC",
+    "generated_at": "2026-03-24 19:30 UTC",
     "total_proxies": 4,
-    "verified_count": 0,
-    "unverified_count": 4,
-    "avg_latency_ms": 370.1
+    "verified_count": 4,
+    "unverified_count": 0,
+    "avg_latency_ms": 332.9
   }
 }
