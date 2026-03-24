@@ -2,9 +2,9 @@
   "total": 4,
   "verified_iranian": 4,
   "unverified": 0,
-  "generated_at": "2026-03-24T19:30:59.766083+00:00",
+  "generated_at": "2026-03-24T21:07:56.638995+00:00",
   "asn_coverage": 2,
-  "avg_latency_ms": 332.9,
+  "avg_latency_ms": 367.6,
   "proxies": [
     {
       "proxy": "5.120.0.25:8080",
@@ -22,52 +22,10 @@
         "skipped": true,
         "country": "IR"
       },
-      "latency_ms": 339.0,
+      "latency_ms": 384.8,
       "speed_score": 100,
       "working": true,
-      "discovered_at": "2026-03-24T19:30:34.498797+00:00"
-    },
-    {
-      "proxy": "5.115.0.10:80",
-      "ip": "5.115.0.10",
-      "port": 80,
-      "asn": "AS44244",
-      "asn_name": "['IranCell / MCI']",
-      "confidence": 1,
-      "protocols": [
-        "http"
-      ],
-      "exit_verified": true,
-      "exit_unverified": false,
-      "location": {
-        "skipped": true,
-        "country": "IR"
-      },
-      "latency_ms": 325.2,
-      "speed_score": 100,
-      "working": true,
-      "discovered_at": "2026-03-24T19:30:34.500396+00:00"
-    },
-    {
-      "proxy": "5.115.0.10:8080",
-      "ip": "5.115.0.10",
-      "port": 8080,
-      "asn": "AS44244",
-      "asn_name": "['IranCell / MCI']",
-      "confidence": 1,
-      "protocols": [
-        "http"
-      ],
-      "exit_verified": true,
-      "exit_unverified": false,
-      "location": {
-        "skipped": true,
-        "country": "IR"
-      },
-      "latency_ms": 333.1,
-      "speed_score": 100,
-      "working": true,
-      "discovered_at": "2026-03-24T19:30:34.502796+00:00"
+      "discovered_at": "2026-03-24T21:07:31.316761+00:00"
     },
     {
       "proxy": "185.112.32.75:8080",
@@ -85,10 +43,52 @@
         "skipped": true,
         "country": "IR"
       },
-      "latency_ms": 334.4,
+      "latency_ms": 360.3,
       "speed_score": 100,
       "working": true,
-      "discovered_at": "2026-03-24T19:30:34.508897+00:00"
+      "discovered_at": "2026-03-24T21:07:31.318200+00:00"
+    },
+    {
+      "proxy": "5.115.0.10:8080",
+      "ip": "5.115.0.10",
+      "port": 8080,
+      "asn": "AS44244",
+      "asn_name": "['IranCell / MCI']",
+      "confidence": 1,
+      "protocols": [
+        "http"
+      ],
+      "exit_verified": true,
+      "exit_unverified": false,
+      "location": {
+        "skipped": true,
+        "country": "IR"
+      },
+      "latency_ms": 359.3,
+      "speed_score": 100,
+      "working": true,
+      "discovered_at": "2026-03-24T21:07:31.318283+00:00"
+    },
+    {
+      "proxy": "5.115.0.10:80",
+      "ip": "5.115.0.10",
+      "port": 80,
+      "asn": "AS44244",
+      "asn_name": "['IranCell / MCI']",
+      "confidence": 1,
+      "protocols": [
+        "http"
+      ],
+      "exit_verified": true,
+      "exit_unverified": false,
+      "location": {
+        "skipped": true,
+        "country": "IR"
+      },
+      "latency_ms": 365.9,
+      "speed_score": 100,
+      "working": true,
+      "discovered_at": "2026-03-24T21:07:31.321665+00:00"
     }
   ]
 }
