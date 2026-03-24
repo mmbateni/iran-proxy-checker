@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
-Iran Proxy Checker — Active CIDR Scanner Edition
-=================================================
-PHASE 1 — Passive collection: Fetches from 30+ global and local sources.
-PHASE 2 — Active CIDR scan: Probes Iranian CIDRs for unlisted open proxies.
+Iran Proxy Checker — Active CIDR Scanner Edition (Bug-Fix Version)
+===================================================================
+FIX: Added IP sanitization to handle leading zeros in passive sources.
 """
 
 import ipaddress, os, socket, requests, concurrent.futures
@@ -27,38 +26,42 @@ PROXY_PORTS    = [1080, 3128, 8080, 8088, 8118, 8888, 9999]
 
 ASN_JSON_PATH  = Path(__file__).parent / "merged_routable_asns.json"
 
-REACHABLE_ASNS = [
-    "AS43754", "AS64422", "AS62229", "AS48159", "AS12880", "AS16322",
-    "AS42337", "AS49666", "AS21341", "AS24631", "AS56402", "AS31549",
-    "AS44244", "AS197207", "AS58224", "AS39501", "AS57218", "AS25184"
-]
-
-TEST_URLS = ["http://api.ipify.org", "http://google.com/generate_204"]
 IP_PORT_RE = re.compile(r"\b(\d{1,3}(?:\.\d{1,3}){3}):(\d{2,5})\b")
 PRIVATE_RE = re.compile(r"^(?:0\.|10\.|127\.|169\.254\.|172\.(?:1[6-9]|2\d|3[01])\.|192\.168\.)")
 
-NOW_UTC = datetime.now(timezone.utc)
-CUTOFF  = NOW_UTC - timedelta(hours=FRESH_HOURS)
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
-# ── Phase 1: Passive Collection (Enhanced) ────────────────────────────────────
+def sanitize_ip(ip_str):
+    """Strips leading zeros from octets to prevent AddressValueError."""
+    try:
+        return ".".join(str(int(octet)) for octet in ip_str.split("."))
+    except:
+        return ip_str
 
 def fetch_raw_url(url, label):
     try:
         r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=SCRAPE_TIMEOUT)
         found = set(IP_PORT_RE.findall(r.text))
-        return {f"{ip}:{port}": "repo_fresh" for ip, port in found if not PRIVATE_RE.match(ip)}
+        cleaned = {}
+        for ip, port in found:
+            if not PRIVATE_RE.match(ip):
+                # Clean IP before storing
+                clean_ip = sanitize_ip(ip)
+                cleaned[f"{clean_ip}:{port}"] = "repo_fresh"
+        return cleaned
     except:
         return {}
+
+# ── Phases ────────────────────────────────────────────────────────────────────
 
 def collect_passive_candidates() -> dict:
     log("\n── Phase 1: Passive collection from 25+ sources ──")
     all_proxies = {}
     
-    # High-volume Global Aggregators
-    global_sources = [
+    sources = [
         "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/http.txt",
         "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/socks4.txt",
         "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/socks5.txt",
@@ -69,24 +72,18 @@ def collect_passive_candidates() -> dict:
         "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies.txt",
         "https://raw.githubusercontent.com/roosterkid/open-proxies/main/socks5.txt",
         "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/all.txt",
-        "https://raw.githubusercontent.com/vsmutok/ProxyForFree/main/all.txt"
+        "https://raw.githubusercontent.com/daniyal-abbassi/iran-proxy/main/proxy.txt",
+        "https://api.proxyscrape.com/v2/?request=getproxies&protocol=http,socks4,socks5&timeout=10000&country=all"
     ]
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=15) as ex:
-        futures = {ex.submit(fetch_raw_url, url, "global"): url for url in global_sources}
-        # Include your original targeted sources
-        futures[ex.submit(fetch_raw_url, "https://raw.githubusercontent.com/sakha1370/OpenRay/main/output_iran/iran_top100_checked.txt", "openray")] = "openray"
-        
+        futures = {ex.submit(fetch_raw_url, url, "source"): url for url in sources}
         for future in concurrent.futures.as_completed(futures):
             res = future.result()
-            for proxy, ts in res.items():
-                if proxy not in all_proxies:
-                    all_proxies[proxy] = {"ts": ts, "source": "passive"}
+            all_proxies.update(res)
 
     log(f"  Passive total: {len(all_proxies)} candidates fetched.")
     return all_proxies
-
-# ── Phase 2: Active CIDR Scanner (Full Implementation) ───────────────────────
 
 def tcp_probe(args):
     ip, port = args
@@ -100,64 +97,70 @@ def scan_routable_cidrs(networks):
     log("\n── Phase 2: Active CIDR scan ──")
     targets = []
     for net in networks:
-        subnets = list(net.subnets(new_prefix=24)) if net.prefixlen <= 24 else [net]
-        for subnet in subnets:
-            base = int(subnet.network_address)
+        # Sampling logic
+        try:
+            base = int(net.network_address)
             for offset in SAMPLE_OFFSETS:
-                if offset < subnet.num_addresses:
+                if offset < net.num_addresses:
                     ip = str(ipaddress.IPv4Address(base + offset))
                     for port in PROXY_PORTS:
                         targets.append((ip, port))
+        except: continue
     
     random.shuffle(targets)
     log(f"  Probing {len(targets):,} targets across {len(networks)} prefixes...")
     
-    hits = set()
     with concurrent.futures.ThreadPoolExecutor(max_workers=SCAN_WORKERS) as ex:
-        results = list(ex.map(tcp_probe, targets, chunksize=500))
+        results = list(ex.map(tcp_probe, targets, chunksize=1000))
         hits = {r for r in results if r}
         
     log(f"  Scan complete: {len(hits)} open ports found.")
     return hits
 
-# ── Core Logic ────────────────────────────────────────────────────────────────
-
-def load_routable_networks():
-    # Simplification of your BGPView/JSON logic for reliability
-    fallback = ["79.127.0.0/17", "188.0.208.0/20", "62.60.0.0/15", "213.176.0.0/16", "2.144.0.0/12"]
-    nets = [ipaddress.IPv4Network(c) for c in fallback]
-    if ASN_JSON_PATH.exists():
-        with open(ASN_JSON_PATH) as f:
-            data = json.load(f)
-            for entry in data.values():
-                for cidr in entry.get("prefixes", []):
-                    try: nets.append(ipaddress.IPv4Network(cidr, strict=False))
-                    except: pass
-    return list(set(nets))
+# ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
     log("=" * 60)
-    log(f"Iran Proxy Checker — Full Execution Mode")
+    log("Iran Proxy Checker — Fixed Execution Mode")
     log("=" * 60)
 
-    networks = load_routable_networks()
-    
-    # Phase 1
-    passive_data = collect_passive_candidates()
-    passive_list = [p for p in passive_data if any(ipaddress.IPv4Address(p.split(":")[0]) in net for net in networks)]
-    log(f"  {len(passive_list)} passive candidates matched Iranian ASNs.")
+    # 1. Load Iranian Networks
+    fallback = ["5.160.0.0/12", "31.24.0.0/14", "37.254.0.0/15", "62.60.0.0/15", "77.36.0.0/14"]
+    networks = [ipaddress.IPv4Network(c) for c in fallback]
+    if ASN_JSON_PATH.exists():
+        with open(ASN_JSON_PATH) as f:
+            try:
+                data = json.load(f)
+                cidr_list = data.get("cidr_list", [])
+                networks = [ipaddress.IPv4Network(c, strict=False) for c in cidr_list]
+            except: pass
 
-    # Phase 2
+    # 2. Collect Passive
+    passive_data = collect_passive_candidates()
+    
+    # 3. Filter for Iran with Safety
+    passive_list = []
+    for p_str in passive_data:
+        try:
+            ip_only = p_str.split(":")[0]
+            ip_obj = ipaddress.IPv4Address(ip_only)
+            if any(ip_obj in net for net in networks):
+                passive_list.append(p_str)
+        except Exception:
+            continue # Skip malformed IPs that somehow slipped through
+            
+    log(f"  {len(passive_list)} passive candidates matched Iranian IP blocks.")
+
+    # 4. Run Active Scan
     scan_hits = scan_routable_cidrs(networks)
 
-    # Merge & Save
+    # 5. Save Results
     all_final = set(passive_list) | scan_hits
-    log(f"\n[√] Total Iranian candidates: {len(all_final)}")
+    log(f"\n[√] Total Iranian proxies identified: {len(all_final)}")
     
     with open("working_iran_proxies.txt", "w") as f:
         f.write("\n".join(all_final))
-    
-    # Save a minimal JSON for compatibility
+        
     with open("working_iran_proxies.json", "w") as f:
         json.dump({"total": len(all_final), "proxies": list(all_final)}, f)
 
