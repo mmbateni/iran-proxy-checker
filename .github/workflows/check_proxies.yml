@@ -32,10 +32,9 @@ jobs:
       - name: Collect + scan Iranian proxy candidates
         run: python check_proxies.py
         env:
-          SCAN_WORKERS: 2000
-          SKIP_EXIT_VERIFY: 1  # Temporarily skip exit verification
+          SKIP_EXIT_VERIFY: 1          # Temporarily skip exit verification
           MIN_CONFIDENCE: 1
-          COLLECT_ONLY: "1"          # Azure can't reach Iranian IPs for live test
+          COLLECT_ONLY: "1"            # Azure can't reach Iranian IPs for live test
           FRESH_HOURS: "72"
           SCAN_WORKERS: ${{ github.event.inputs.scan_workers || '2000' }}
           SCAN_TCP_TO: ${{ github.event.inputs.scan_tcp_to || '0.5' }}
