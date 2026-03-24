@@ -15,7 +15,7 @@ on:
 jobs:
   collect-proxies:
     runs-on: ubuntu-latest
-    timeout-minutes: 30        # scan adds ~2 min; give plenty of headroom
+    timeout-minutes: 50        # scan adds ~2 min; give plenty of headroom
     permissions:
       contents: write
 
