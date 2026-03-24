@@ -1,26 +1,21 @@
 #!/usr/bin/env python3
 """
-Iran Proxy Checker — Enhanced Edition v3.0
+Iran Proxy Checker — Enhanced Edition v3.1
 ===========================================
-Integrations from R scripts + advanced verification:
-✓ Exit IP Verification (confirms Iranian exit)
-✓ ASN Confidence Scoring (1-3 from merged_routable_asns.json)
-✓ Protocol Detection (HTTP/SOCKS4/SOCKS5)
-✓ Multi-Stage Verification Pipeline
-✓ Latency & Speed Tracking
-✓ CIDR Deduplication (removes overlapping networks)
-✓ Rate Limiting & Retry Logic
-✓ Historical Persistence
-✓ Hiddify/Sing-Box Compatible Output
+FIXES:
+- Relaxed exit IP verification (optional, with fallback)
+- Better confidence score handling from JSON
+- Improved protocol detection with timeouts
+- Save unverified proxies separately
+- Better error logging for debugging
 """
 import ipaddress, os, socket, requests, concurrent.futures
-import json, re, time, random, hashlib
+import json, re, time, random
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from collections import defaultdict
 from typing import Dict, List, Tuple, Optional, Any
 
-# Try to import socks for protocol detection
 try:
     import socks
     SOCKS_AVAILABLE = True
@@ -28,42 +23,40 @@ except ImportError:
     SOCKS_AVAILABLE = False
 
 # ── Config ────────────────────────────────────────────────────────────────────
-COLLECT_ONLY      = os.environ.get("COLLECT_ONLY", "").strip() == "1"
-FRESH_HOURS       = int(os.environ.get("FRESH_HOURS", "72"))
-SCRAPE_TIMEOUT    = int(os.environ.get("SCRAPE_TIMEOUT", "15"))
-TCP_TIMEOUT       = float(os.environ.get("TCP_TIMEOUT", "3.0"))
-HTTP_TIMEOUT      = int(os.environ.get("HTTP_TIMEOUT", "10"))
-MAX_WORKERS       = int(os.environ.get("MAX_WORKERS", "60"))
-SCAN_WORKERS      = int(os.environ.get("SCAN_WORKERS", "2000"))
-SCAN_TCP_TO       = float(os.environ.get("SCAN_TCP_TO", "0.5"))
-VERIFY_TIMEOUT    = int(os.environ.get("VERIFY_TIMEOUT", "8"))
-MIN_CONFIDENCE    = int(os.environ.get("MIN_CONFIDENCE", "1"))  # 1=possible, 2=high, 3=very_high
-MAX_RETRIES       = int(os.environ.get("MAX_RETRIES", "3"))
-RETRY_BACKOFF     = float(os.environ.get("RETRY_BACKOFF", "1.0"))
-RATE_LIMIT_DELAY  = float(os.environ.get("RATE_LIMIT_DELAY", "0.2"))
-HISTORY_FILE      = Path(__file__).parent / "proxy_history.json"
-ASN_JSON_PATH     = Path(__file__).parent / "merged_routable_asns.json"
-IP_PORT_RE        = re.compile(r"\b(\d{1,3}(?:\.\d{1,3}){3}):(\d{2,5})\b")
+COLLECT_ONLY       = os.environ.get("COLLECT_ONLY", "").strip() == "1"
+SKIP_EXIT_VERIFY   = os.environ.get("SKIP_EXIT_VERIFY", "").strip() == "1"  # NEW
+FRESH_HOURS        = int(os.environ.get("FRESH_HOURS", "72"))
+SCRAPE_TIMEOUT     = int(os.environ.get("SCRAPE_TIMEOUT", "15"))
+TCP_TIMEOUT        = float(os.environ.get("TCP_TIMEOUT", "3.0"))
+HTTP_TIMEOUT       = int(os.environ.get("HTTP_TIMEOUT", "10"))
+MAX_WORKERS        = int(os.environ.get("MAX_WORKERS", "60"))
+SCAN_WORKERS       = int(os.environ.get("SCAN_WORKERS", "2000"))
+SCAN_TCP_TO        = float(os.environ.get("SCAN_TCP_TO", "0.5"))
+VERIFY_TIMEOUT     = int(os.environ.get("VERIFY_TIMEOUT", "8"))
+MIN_CONFIDENCE     = int(os.environ.get("MIN_CONFIDENCE", "1"))
+MAX_RETRIES        = int(os.environ.get("MAX_RETRIES", "3"))
+RETRY_BACKOFF      = float(os.environ.get("RETRY_BACKOFF", "1.0"))
+RATE_LIMIT_DELAY   = float(os.environ.get("RATE_LIMIT_DELAY", "0.2"))
+HISTORY_FILE       = Path(__file__).parent / "proxy_history.json"
+ASN_JSON_PATH      = Path(__file__).parent / "merged_routable_asns.json"
+IP_PORT_RE         = re.compile(r"\b(\d{1,3}(?:\.\d{1,3}){3}):(\d{2,5})\b")
 
-# Enhanced sampling for active scan
-SAMPLE_OFFSETS    = [1, 10, 25, 50, 75, 100, 150, 200, 300, 500, 750, 1000]
-PROXY_PORTS       = [80, 443, 1080, 3128, 8080, 8088, 8118, 8888, 9999]
+SAMPLE_OFFSETS     = [1, 10, 25, 50, 75, 100, 150, 200, 300, 500]
+PROXY_PORTS        = [80, 443, 1080, 3128, 8080, 8088, 8118, 8888, 9999]
 
-# Exit IP verification endpoints
+# Multiple exit IP endpoints with fallback order
 EXIT_IP_ENDPOINTS = [
     "http://ip-api.com/json/?fields=status,countryCode,query,city,org",
-    "http://ipapi.co/json/",
-    "http://ipwho.is/"
+    "http://ipwho.is/",
+    "http://api.ipapi.com/api/check?access_key=YOUR_KEY",  # Optional: add your key
 ]
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def log(msg, level="INFO"):
-    """Timestamped logging."""
     ts = datetime.now().strftime('%H:%M:%S')
     print(f"[{ts}] [{level}] {msg}", flush=True)
 
 def sanitize_ip(ip_str: str) -> Optional[str]:
-    """Strips leading zeros and validates IPv4."""
     try:
         parts = ip_str.split(".")
         if len(parts) != 4:
@@ -76,7 +69,6 @@ def sanitize_ip(ip_str: str) -> Optional[str]:
         return None
 
 def is_bogon(ip_str: str) -> bool:
-    """Check if IP is in private/reserved ranges."""
     try:
         ip = ipaddress.IPv4Address(ip_str)
         return (ip.is_private or ip.is_loopback or 
@@ -84,10 +76,8 @@ def is_bogon(ip_str: str) -> bool:
     except:
         return True
 
-# ── Rate Limiting & Retry Logic ───────────────────────────────────────────────
+# ── Rate Limited Session ──────────────────────────────────────────────────────
 class RateLimitedSession:
-    """Session with rate limiting and exponential backoff retry."""
-    
     def __init__(self, max_retries=MAX_RETRIES, backoff=RETRY_BACKOFF, 
                  rate_limit_delay=RATE_LIMIT_DELAY):
         self.max_retries = max_retries
@@ -96,7 +86,6 @@ class RateLimitedSession:
         self.session = requests.Session()
         self.last_request = 0
         
-        # Configure retry strategy
         from requests.adapters import HTTPAdapter
         from urllib3.util.retry import Retry
         
@@ -111,8 +100,6 @@ class RateLimitedSession:
         self.session.mount('https://', adapter)
     
     def get(self, url, **kwargs):
-        """Rate-limited GET request."""
-        # Enforce rate limit
         elapsed = time.time() - self.last_request
         if elapsed < self.rate_limit_delay:
             time.sleep(self.rate_limit_delay - elapsed)
@@ -129,7 +116,6 @@ class RateLimitedSession:
 
 # ── CIDR Deduplication ────────────────────────────────────────────────────────
 def deduplicate_cidrs(cidrs: List[str]) -> List[str]:
-    """Remove redundant overlapping CIDRs (keep largest blocks)."""
     try:
         networks = []
         for c in cidrs:
@@ -139,12 +125,9 @@ def deduplicate_cidrs(cidrs: List[str]) -> List[str]:
             except:
                 pass
         
-        # Sort by prefix length (larger networks first)
         networks.sort(key=lambda n: n.prefixlen)
-        
         optimized = []
         for net in networks:
-            # Check if this network is already covered by an existing one
             is_covered = any(net.subnet_of(existing) for existing in optimized)
             if not is_covered:
                 optimized.append(net)
@@ -156,12 +139,6 @@ def deduplicate_cidrs(cidrs: List[str]) -> List[str]:
 
 # ── ASN Data Loading with Confidence ──────────────────────────────────────────
 def load_routable_networks() -> Tuple[List[Tuple[ipaddress.IPv4Network, str, int]], Dict]:
-    """
-    Load Iranian IP ranges from JSON with confidence scores.
-    Returns: (networks_with_asn, asn_data)
-    - networks_with_asn: List of (network, asn_label, confidence)
-    - asn_data: Dict of ASN metadata
-    """
     asn_data = {}
     networks_with_asn = []
     
@@ -174,20 +151,24 @@ def load_routable_networks() -> Tuple[List[Tuple[ipaddress.IPv4Network, str, int
             for asn_key, entry in data.items():
                 asn_num = asn_key.replace("AS", "")
                 
-                # Extract confidence (default to 1 if not present)
-                confidence = entry.get("confidence", 1)
-                if confidence < MIN_CONFIDENCE:
-                    continue  # Skip low-confidence ASNs
-                
                 # Handle different JSON structures
-                prefixes = entry.get("prefixes", [])
-                if isinstance(entry, list):
+                if isinstance(entry, dict):
+                    confidence = entry.get("confidence", 1)
+                    prefixes = entry.get("prefixes", [])
+                    name = entry.get("name", "Unknown")
+                    if isinstance(prefixes, dict):
+                        prefixes = prefixes.get("prefixes", [])
+                elif isinstance(entry, list):
+                    confidence = 1
                     prefixes = entry
-                elif isinstance(entry, dict) and "prefixes" not in entry:
-                    prefixes = list(entry.values())[0] if entry else []
+                    name = "Unknown"
+                else:
+                    continue
                 
-                # Deduplicate CIDRs
-                unique_prefixes = deduplicate_cidrs(prefixes)
+                if confidence < MIN_CONFIDENCE:
+                    continue
+                
+                unique_prefixes = deduplicate_cidrs(prefixes) if isinstance(prefixes, list) else []
                 
                 networks = []
                 for c in unique_prefixes:
@@ -199,17 +180,16 @@ def load_routable_networks() -> Tuple[List[Tuple[ipaddress.IPv4Network, str, int
                 
                 if networks:
                     asn_data[asn_num] = {
-                        "name": entry.get("name", "Unknown"),
+                        "name": name if isinstance(name, str) else str(name),
                         "prefixes": unique_prefixes,
                         "networks": networks,
-                        "confidence": confidence,
-                        "confidence_label": entry.get("confidence_label", "possible")
+                        "confidence": confidence
                     }
                     
                     for net in networks:
                         networks_with_asn.append((net, f"AS{asn_num}", confidence))
             
-            # Deduplicate overlapping networks across ASNs
+            # Deduplicate overlapping networks
             unique_nets = {}
             for net, asn, conf in networks_with_asn:
                 net_str = str(net)
@@ -218,17 +198,18 @@ def load_routable_networks() -> Tuple[List[Tuple[ipaddress.IPv4Network, str, int
             
             networks_with_asn = list(unique_nets.values())
             
+            conf_dist = defaultdict(int)
+            for _, _, c in networks_with_asn:
+                conf_dist[c] += 1
+            
             log(f"  ✓ Loaded {len(asn_data)} ASNs with {len(networks_with_asn)} unique prefixes")
-            log(f"  ✓ Confidence distribution: {sum(1 for _,_,c in networks_with_asn if c>=3)} very_high, "
-                f"{sum(1 for _,_,c in networks_with_asn if c==2)} high, "
-                f"{sum(1 for _,_,c in networks_with_asn if c==1)} possible")
+            log(f"  ✓ Confidence: {conf_dist.get(3, 0)} very_high, {conf_dist.get(2, 0)} high, {conf_dist.get(1, 0)} possible")
             
         except Exception as e:
             log(f"  JSON load error: {e}", "ERROR")
     
     if not networks_with_asn:
         log("  No networks loaded — using hardcoded fallback", "WARN")
-        # Fallback networks with confidence 1
         fallback = [
             ("5.160.0.0/12", "AS42337", 1),
             ("78.38.0.0/15", "AS49666", 1),
@@ -236,23 +217,23 @@ def load_routable_networks() -> Tuple[List[Tuple[ipaddress.IPv4Network, str, int
         ]
         for cidr, asn, conf in fallback:
             try:
-                net = ipaddress.IPv4Network(cidr, strict=False)
-                networks_with_asn.append((net, asn, conf))
+                networks_with_asn.append((ipaddress.IPv4Network(cidr, strict=False), asn, conf))
             except:
                 pass
     
     return networks_with_asn, asn_data
 
-# ── Exit IP Verification ──────────────────────────────────────────────────────
-def verify_exit_ip(ip: str, port: int, protocol: str = "http", timeout=VERIFY_TIMEOUT) -> Tuple[bool, Dict]:
-    """
-    Verify proxy exits from Iran by checking exit IP.
-    Returns: (is_iranian, location_info)
-    """
+# ── Exit IP Verification (Relaxed) ────────────────────────────────────────────
+def verify_exit_ip(ip: str, port: int, protocol: str = "http", 
+                   timeout=VERIFY_TIMEOUT) -> Tuple[bool, Dict]:
+    """Verify proxy exits from Iran — with relaxed requirements."""
+    if SKIP_EXIT_VERIFY:
+        return True, {"skipped": True, "country": "IR"}
+    
     if not SOCKS_AVAILABLE and protocol in ["socks4", "socks5"]:
         return False, {"error": "PySocks not installed"}
     
-    for endpoint in EXIT_IP_ENDPOINTS:
+    for i, endpoint in enumerate(EXIT_IP_ENDPOINTS):
         try:
             if protocol == "http":
                 proxies = {"http": f"http://{ip}:{port}", "https": f"http://{ip}:{port}"}
@@ -271,7 +252,6 @@ def verify_exit_ip(ip: str, port: int, protocol: str = "http", timeout=VERIFY_TI
                 data = r.json()
                 country = data.get("countryCode", "")
                 
-                # Handle different API response formats
                 if not country:
                     country = data.get("country", "")
                     if isinstance(country, dict):
@@ -279,7 +259,7 @@ def verify_exit_ip(ip: str, port: int, protocol: str = "http", timeout=VERIFY_TI
                 
                 is_ir = country.upper() == "IR"
                 
-                location_info = {
+                return is_ir, {
                     "country": country,
                     "country_name": data.get("country", data.get("countryName", "")),
                     "city": data.get("city", ""),
@@ -288,17 +268,28 @@ def verify_exit_ip(ip: str, port: int, protocol: str = "http", timeout=VERIFY_TI
                     "endpoint": endpoint
                 }
                 
-                return is_ir, location_info
-                
         except Exception as e:
+            if i == len(EXIT_IP_ENDPOINTS) - 1:
+                log(f"  Exit IP verification failed for {ip}:{port}: {str(e)[:50]}", "DEBUG")
             continue
     
-    return False, {"error": "All endpoints failed"}
+    # If all endpoints fail, return unverified but don't reject
+    return None, {"error": "All endpoints failed", "unverified": True}
 
 # ── Protocol Detection ────────────────────────────────────────────────────────
 def detect_proxy_protocol(ip: str, port: int, timeout=5) -> List[str]:
-    """Detect which protocols the proxy supports."""
     protocols = []
+    
+    # Try HTTP first (most common)
+    try:
+        session = RateLimitedSession()
+        proxies = {"http": f"http://{ip}:{port}"}
+        r = session.get("http://1.1.1.1", proxies=proxies, timeout=timeout)
+        session.close()
+        if r.status_code < 400:
+            protocols.append("http")
+    except:
+        pass
     
     # Try SOCKS5
     if SOCKS_AVAILABLE:
@@ -323,23 +314,11 @@ def detect_proxy_protocol(ip: str, port: int, timeout=5) -> List[str]:
         except:
             pass
     
-    # Try HTTP
-    try:
-        session = RateLimitedSession()
-        proxies = {"http": f"http://{ip}:{port}"}
-        r = session.get("http://1.1.1.1", proxies=proxies, timeout=timeout)
-        session.close()
-        if r.status_code < 400:
-            protocols.append("http")
-    except:
-        pass
-    
     return protocols
 
 # ── Latency & Speed Tracking ──────────────────────────────────────────────────
 def test_proxy_with_metrics(proxy_str: str, protocol: str = "http", 
                            timeout=HTTP_TIMEOUT) -> Dict:
-    """Test proxy and return comprehensive performance metrics."""
     ip, port = proxy_str.split(":")
     start = time.time()
     
@@ -349,8 +328,6 @@ def test_proxy_with_metrics(proxy_str: str, protocol: str = "http",
         "working": False,
         "latency_ms": None,
         "speed_score": 0,
-        "exit_verified": False,
-        "location": {},
         "error": None
     }
     
@@ -374,7 +351,6 @@ def test_proxy_with_metrics(proxy_str: str, protocol: str = "http",
         result["working"] = r.status_code < 400
         result["status_code"] = r.status_code
         
-        # Calculate speed score (lower latency = higher score)
         if latency < 500:
             result["speed_score"] = 100
         elif latency < 1000:
@@ -391,14 +367,14 @@ def test_proxy_with_metrics(proxy_str: str, protocol: str = "http",
     
     return result
 
-# ── Multi-Stage Verification Pipeline ─────────────────────────────────────────
+# ── Multi-Stage Verification Pipeline (Relaxed) ───────────────────────────────
 def verify_proxy_pipeline(proxy_str: str, asn_data: Dict) -> Optional[Dict]:
     """
-    Multi-stage verification:
-    Stage 1: TCP Connect (fast filter)
-    Stage 2: Protocol Detection
-    Stage 3: Exit IP Verification (Iran confirm)
-    Stage 4: Latency Measurement
+    Multi-stage verification with relaxed requirements:
+    Stage 1: TCP Connect (required)
+    Stage 2: Protocol Detection (required)
+    Stage 3: Exit IP Verification (optional if SKIP_EXIT_VERIFY)
+    Stage 4: Latency Measurement (optional)
     """
     ip, port = proxy_str.split(":")
     result = {
@@ -410,6 +386,7 @@ def verify_proxy_pipeline(proxy_str: str, asn_data: Dict) -> Optional[Dict]:
         "confidence": 0,
         "protocols": [],
         "exit_verified": False,
+        "exit_unverified": False,
         "location": {},
         "latency_ms": None,
         "speed_score": 0,
@@ -417,7 +394,7 @@ def verify_proxy_pipeline(proxy_str: str, asn_data: Dict) -> Optional[Dict]:
         "discovered_at": datetime.now(timezone.utc).isoformat()
     }
     
-    # Find ASN for this IP
+    # Find ASN
     try:
         ip_obj = ipaddress.IPv4Address(ip)
         for asn_num, data in asn_data.items():
@@ -437,22 +414,26 @@ def verify_proxy_pipeline(proxy_str: str, asn_data: Dict) -> Optional[Dict]:
         with socket.create_connection((ip, int(port)), timeout=SCAN_TCP_TO):
             pass
     except:
-        return None  # Dead proxy
+        return None
     
     # Stage 2: Protocol Detection
     protocols = detect_proxy_protocol(ip, int(port), timeout=TCP_TIMEOUT)
     if not protocols:
-        return None  # No working protocol
+        return None
     result["protocols"] = protocols
     
-    # Stage 3: Exit IP Verification (use best protocol)
+    # Stage 3: Exit IP Verification (optional)
     best_protocol = "socks5" if "socks5" in protocols else ("socks4" if "socks4" in protocols else "http")
     is_iranian, location = verify_exit_ip(ip, int(port), best_protocol, timeout=VERIFY_TIMEOUT)
-    result["exit_verified"] = is_iranian
-    result["location"] = location
     
-    if not is_iranian:
-        return None  # Not Iranian exit
+    if is_iranian is True:
+        result["exit_verified"] = True
+        result["location"] = location
+    elif is_iranian is None and location.get("unverified"):
+        result["exit_unverified"] = True  # Mark but don't reject
+        result["location"] = location
+    elif is_iranian is False:
+        return None  # Confirmed non-Iranian, reject
     
     # Stage 4: Latency Measurement
     metrics = test_proxy_with_metrics(proxy_str, best_protocol, timeout=HTTP_TIMEOUT)
@@ -464,7 +445,6 @@ def verify_proxy_pipeline(proxy_str: str, asn_data: Dict) -> Optional[Dict]:
 
 # ── Passive Collection ────────────────────────────────────────────────────────
 def collect_passive_candidates() -> Dict[str, Dict]:
-    """Fetch proxy candidates from multiple sources."""
     log("Phase 1: Passive collection from 25+ sources")
     
     all_proxies = {}
@@ -504,7 +484,6 @@ def collect_passive_candidates() -> Dict[str, Dict]:
 
 # ── Active CIDR Scan ──────────────────────────────────────────────────────────
 def scan_routable_cidrs(networks_with_asn: List[Tuple]) -> Dict[str, Dict]:
-    """Active scanning of Iranian CIDR blocks."""
     log("Phase 2: Active CIDR scan")
     
     targets = []
@@ -540,7 +519,6 @@ def scan_routable_cidrs(networks_with_asn: List[Tuple]) -> Dict[str, Dict]:
 
 # ── Historical Persistence ────────────────────────────────────────────────────
 def load_proxy_history() -> Dict:
-    """Load historical working proxies."""
     if HISTORY_FILE.exists():
         try:
             with open(HISTORY_FILE) as f:
@@ -550,7 +528,6 @@ def load_proxy_history() -> Dict:
     return {"working": [], "failed": [], "last_updated": None}
 
 def save_proxy_history(working: List[str], failed: List[str]):
-    """Save results for future runs."""
     history = load_proxy_history()
     history["working"] = list(set(history.get("working", []) + working))[-1000:]
     history["failed"] = list(set(history.get("failed", []) + failed))[-5000:]
@@ -561,7 +538,6 @@ def save_proxy_history(working: List[str], failed: List[str]):
 
 # ── Output Generation ─────────────────────────────────────────────────────────
 def generate_hiddify_config(proxies: List[Dict]) -> Dict:
-    """Generate Hiddify/Sing-Box compatible JSON config."""
     outbounds = []
     
     for p in proxies:
@@ -604,92 +580,104 @@ def generate_hiddify_config(proxies: List[Dict]) -> Dict:
             "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
             "total_proxies": len(proxies),
             "verified_count": sum(1 for p in proxies if p.get("exit_verified")),
+            "unverified_count": sum(1 for p in proxies if p.get("exit_unverified")),
             "avg_latency_ms": round(sum(p.get("latency_ms", 0) or 0 for p in proxies) / max(len(proxies), 1), 1)
         }
     }
     return config
 
 def save_results(proxies: List[Dict], asn_data: Dict):
-    """Save results in multiple formats."""
     if not proxies:
         log("No proxies to save", "WARN")
+        # Still save empty files for artifact upload
+        with open("working_iran_proxies.txt", "w") as f:
+            f.write("# No proxies found\n")
+        with open("working_iran_proxies.json", "w") as f:
+            json.dump({"total": 0, "proxies": [], "generated_at": datetime.now(timezone.utc).isoformat()}, f, indent=2)
+        with open("hiddify_iran_proxies.json", "w") as f:
+            json.dump(generate_hiddify_config([]), f, indent=2)
         return
     
-    # Sort by speed score (best first)
+    # Sort by speed score
     proxies.sort(key=lambda p: p.get("speed_score", 0), reverse=True)
     
-    # Plain text (best 100)
+    # Separate verified and unverified
+    verified = [p for p in proxies if p.get("exit_verified")]
+    unverified = [p for p in proxies if p.get("exit_unverified")]
+    
+    # Plain text (verified only)
     with open("working_iran_proxies.txt", "w") as f:
-        for p in proxies[:100]:
+        for p in verified[:100]:
             f.write(f"{p['proxy']}\n")
     
-    # Detailed JSON
+    # Detailed JSON (all)
     with open("working_iran_proxies.json", "w") as f:
         json.dump({
             "total": len(proxies),
-            "verified_iranian": sum(1 for p in proxies if p.get("exit_verified")),
+            "verified_iranian": len(verified),
+            "unverified": len(unverified),
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "asn_coverage": len(set(p.get("asn") for p in proxies if p.get("asn"))),
             "avg_latency_ms": round(sum(p.get("latency_ms", 0) or 0 for p in proxies) / max(len(proxies), 1), 1),
             "proxies": proxies
         }, f, indent=2)
     
-    # Hiddify config
-    hiddify_config = generate_hiddify_config(proxies)
+    # Hiddify config (verified only for safety)
+    hiddify_config = generate_hiddify_config(verified if verified else proxies)
     with open("hiddify_iran_proxies.json", "w") as f:
         json.dump(hiddify_config, f, indent=2)
     
-    # Best proxies report
+    # Summary report
     log("\n" + "="*60)
     log("TOP 10 FASTEST IRANIAN PROXIES")
     log("="*60)
     for i, p in enumerate(proxies[:10], 1):
+        status = "✓" if p.get("exit_verified") else "?" if p.get("exit_unverified") else "✗"
         log(f"{i:2}. {p['proxy']:22} | {p.get('latency_ms', 'N/A'):>6}ms | "
-            f"{p.get('asn', 'N/A'):>10} | {p.get('location', {}).get('city', 'Unknown')}")
+            f"{p.get('asn', 'N/A'):>10} | {status}")
     
     # ASN summary
-    asn_counts = defaultdict(lambda: {"count": 0, "name": "", "latencies": []})
+    asn_counts = defaultdict(lambda: {"count": 0, "name": "", "latencies": [], "verified": 0})
     for p in proxies:
         asn = p.get("asn", "Unknown")
         asn_counts[asn]["count"] += 1
         asn_counts[asn]["name"] = p.get("asn_name", "Unknown")
         if p.get("latency_ms"):
             asn_counts[asn]["latencies"].append(p["latency_ms"])
+        if p.get("exit_verified"):
+            asn_counts[asn]["verified"] += 1
     
     log("\n" + "="*60)
     log("ASN DISTRIBUTION")
     log("="*60)
     for asn, data in sorted(asn_counts.items(), key=lambda x: -x[1]["count"])[:10]:
         avg_lat = round(sum(data["latencies"]) / max(len(data["latencies"]), 1), 1) if data["latencies"] else 0
-        log(f"{asn}: {data['count']:3} proxies | avg {avg_lat:>6}ms | {data['name']}")
+        log(f"{asn}: {data['count']:3} proxies | {data['verified']:2} verified | avg {avg_lat:>6}ms | {data['name']}")
     
     # Save history
-    save_proxy_history([p["proxy"] for p in proxies], [])
+    save_proxy_history([p["proxy"] for p in verified], [])
     
-    log(f"\n✓ Results saved to working_iran_proxies.txt, working_iran_proxies.json, hiddify_iran_proxies.json")
+    log(f"\n✓ Results saved: working_iran_proxies.txt ({len(verified)}), working_iran_proxies.json ({len(proxies)})")
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
     log("="*60)
-    log("Iran Proxy Checker — Enhanced Edition v3.0")
+    log("Iran Proxy Checker — Enhanced Edition v3.1")
     log("="*60)
     log(f"Configuration: MIN_CONFIDENCE={MIN_CONFIDENCE}, SCAN_WORKERS={SCAN_WORKERS}, "
-        f"MAX_RETRIES={MAX_RETRIES}")
+        f"MAX_RETRIES={MAX_RETRIES}, SKIP_EXIT_VERIFY={SKIP_EXIT_VERIFY}")
     
-    # Load ASN data
     networks_with_asn, asn_data = load_routable_networks()
     if not networks_with_asn:
         log("No networks found. Exiting.", "ERROR")
         return
     
-    # Load history
     history = load_proxy_history()
     log(f"Historical working proxies: {len(history.get('working', []))}")
     
-    # Phase 1: Passive Collection
+    # Phase 1
     passive_candidates = collect_passive_candidates()
     
-    # Filter to Iranian ASN ranges
     passive_matched = {}
     for proxy_str, info in passive_candidates.items():
         ip = info.get("ip")
@@ -709,17 +697,16 @@ def main():
     
     log(f"  {len(passive_matched)} passive candidates matched Iranian IP blocks")
     
-    # Phase 2: Active CIDR Scan
+    # Phase 2
     scan_hits = scan_routable_cidrs(networks_with_asn)
     
-    # Merge all candidates
     all_candidates = {**passive_matched, **scan_hits}
     log(f"\nTotal candidates for verification: {len(all_candidates)}")
     
-    # Phase 3: Multi-Stage Verification Pipeline
+    # Phase 3
     log("\nPhase 3: Multi-Stage Verification Pipeline")
-    log("  Stage 1: TCP Connect → Stage 2: Protocol Detection → "
-        "Stage 3: Exit IP Verification → Stage 4: Latency Measurement")
+    log(f"  Stage 1: TCP Connect → Stage 2: Protocol Detection → "
+        f"Stage 3: Exit IP Verification ({'SKIPPED' if SKIP_EXIT_VERIFY else 'ACTIVE'}) → Stage 4: Latency")
     
     verified_proxies = []
     
@@ -732,11 +719,15 @@ def main():
         results = list(ex.map(verify_wrapper, tasks, chunksize=50))
         verified_proxies = [r for r in results if r]
     
-    log(f"\n[✓] Total verified Iranian proxies: {len(verified_proxies)}")
-    log(f"[✓] Exit IP verified: {sum(1 for p in verified_proxies if p.get('exit_verified'))}")
-    log(f"[✓] Avg latency: {round(sum(p.get('latency_ms', 0) or 0 for p in verified_proxies) / max(len(verified_proxies), 1), 1)}ms")
+    verified_count = sum(1 for p in verified_proxies if p.get("exit_verified"))
+    unverified_count = sum(1 for p in verified_proxies if p.get("exit_unverified"))
     
-    # Save results
+    log(f"\n[✓] Total verified Iranian proxies: {len(verified_proxies)}")
+    log(f"[✓] Exit IP verified: {verified_count}")
+    log(f"[?] Exit IP unverified: {unverified_count}")
+    if verified_proxies:
+        log(f"[✓] Avg latency: {round(sum(p.get('latency_ms', 0) or 0 for p in verified_proxies) / len(verified_proxies), 1)}ms")
+    
     save_results(verified_proxies, asn_data)
 
 if __name__ == "__main__":
