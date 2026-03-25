@@ -1,3 +1,8 @@
+# Iran Network Scanner
+
+A unified script to discover routable Iranian ASNs and working proxies.
+
+## Usage
 # Iran Proxy Checker
 
 Automatically finds and verifies **working Iranian IP proxies** every 24 hours.
