@@ -1,49 +1,140 @@
 name: Iran Network Scan
 
+# Schedule:
+#   - ASN discovery runs weekly (Sunday 02:00 UTC) — APIs are quietest then.
+#   - Proxy scan runs daily (02:00 UTC) — reads committed ASN json from repo.
+#   - Both can be triggered manually via workflow_dispatch with a mode selector.
 on:
   schedule:
-    - cron: "30 20 * * *"   # 20:30 UTC = 00:00 Tehran
+    - cron: "0 2 * * 0"   # Sunday  02:00 UTC — full ASN discovery
+    - cron: "0 2 * * 1-6" # Mon–Sat 02:00 UTC — proxy scan only
   workflow_dispatch:
+    inputs:
+      mode:
+        description: "Run mode"
+        required: false
+        default: "full"
+        type: choice
+        options:
+          - full          # ASN discovery + proxy scan
+          - proxy-only    # Re-use committed ASN json, only scan proxies
+          - asn-only      # Only refresh ASN/prefix database
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Job 1 – ASN Discovery (weekly or manual full/asn-only)
+# ─────────────────────────────────────────────────────────────────────────────
 jobs:
+  discover:
+    name: ASN Discovery
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+
+    # Run on Sunday schedule OR when manually triggered in full/asn-only mode
+    if: |
+      (github.event_name == 'schedule' && github.event.schedule == '0 2 * * 0') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.mode != 'proxy-only')
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: pip install aiohttp aiohttp-socks ipaddress
+
+      - name: Run ASN discovery (BGP-only, no proxy scan)
+        run: python scan.py --bgp-only --save-intermediates --output merged_routable_asns.json
+        env:
+          RIPE_ATLAS_API_KEY:   ${{ secrets.RIPE_ATLAS_API_KEY }}
+          IPINFO_TOKEN:         ${{ secrets.IPINFO_TOKEN }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
+      - name: Upload ASN artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: asn-results-${{ github.run_id }}
+          path: |
+            merged_routable_asns.json
+            bgp_raw.json
+            atlas_raw.json
+
+      - name: Commit updated ASN database
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add merged_routable_asns.json bgp_raw.json atlas_raw.json
+          git diff --cached --quiet || git commit -m "chore: refresh ASN database $(date -u +'%Y-%m-%d')"
+          git push
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Job 2 – Proxy Scan (daily, or after discover on manual full run)
+# ─────────────────────────────────────────────────────────────────────────────
   scan:
+    name: Proxy Scan
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
       contents: write
+
+    # On Sunday: run after discover finishes.
+    # Mon–Sat: no discover job exists, so needs is skipped automatically.
+    # Manual proxy-only: runs without waiting for discover.
+    needs: [discover]
+    if: |
+      always() &&
+      (github.event_name == 'schedule' ||
+       (github.event_name == 'workflow_dispatch' && github.event.inputs.mode != 'asn-only')) &&
+      (needs.discover.result == 'success' || needs.discover.result == 'skipped')
+
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Pull the latest commit so we get the ASN json freshly pushed by
+          # the discover job (if it ran this cycle).
+          ref: main
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-      - name: Install dependencies
-        run: |
-          pip install aiohttp ipaddress
-          pip install aiohttp-socks
-      - name: Install masscan 
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: pip install aiohttp aiohttp-socks ipaddress
+
+      - name: Install masscan
+        continue-on-error: true   # non-fatal: falls back to async scanner
         run: sudo apt-get update && sudo apt-get install -y masscan
-      - name: Run scanner
-        run: python scan.py --use-masscan --save-intermediates --output merged_routable_asns.json
+
+      - name: Run proxy scan
+        run: |
+          python scan.py \
+            --proxy-only \
+            --use-masscan \
+            --save-intermediates \
+            --output merged_routable_asns.json
         env:
-          RIPE_ATLAS_API_KEY: ${{ secrets.RIPE_ATLAS_API_KEY }}
-          IPINFO_TOKEN: ${{ secrets.IPINFO_TOKEN }}
-      - name: Upload artifacts
+          RIPE_ATLAS_API_KEY:   ${{ secrets.RIPE_ATLAS_API_KEY }}
+          IPINFO_TOKEN:         ${{ secrets.IPINFO_TOKEN }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
+      - name: Upload proxy artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: scan-results-${{ github.run_id }}
+          name: proxy-results-${{ github.run_id }}
           path: |
-            merged_routable_asns.json
             working_iran_proxies.txt
             working_iran_proxies.json
             hiddify_iran_proxies.json
-            atlas_raw.json
-            bgp_raw.json
-            reverse_raw.json
-      - name: Commit and push results
+
+      - name: Commit and push proxy results
         run: |
-          git config user.name "github-actions[bot]"
+          git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add merged_routable_asns.json working_iran_proxies.* hiddify_iran_proxies.json
-          git diff --cached --quiet || git commit -m "chore: update results $(date -u +'%Y-%m-%d')"
+          git add working_iran_proxies.txt working_iran_proxies.json hiddify_iran_proxies.json
+          git diff --cached --quiet || git commit -m "chore: update proxies $(date -u +'%Y-%m-%d')"
           git push
