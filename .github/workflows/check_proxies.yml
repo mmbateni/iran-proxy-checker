@@ -18,7 +18,11 @@ jobs:
         with:
           python-version: '3.11'
       - name: Install dependencies
-        run: pip install aiohttp ipaddress
+        run: |
+          pip install aiohttp ipaddress
+          pip install aiohttp-socks
+      - name: Install masscan 
+        run: sudo apt-get update && sudo apt-get install -y masscan
       - name: Run scanner
         run: python scan.py --save-intermediates --output merged_routable_asns.json
         env:
