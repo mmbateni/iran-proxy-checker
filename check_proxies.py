@@ -33,18 +33,16 @@ GitHub Actions:
 
 import asyncio
 import aiohttp
-import aiofiles
 import argparse
 import ipaddress
 import json
 import os
 import random
 import socket
-import subprocess
 import sys
 from collections import Counter, defaultdict
-from datetime import datetime, timezone
-from typing import Dict, List, Optional, Tuple
+from datetime import datetime
+from typing import Dict, List, Optional
 
 # ---------- Configuration (can be overridden by env vars) ----------
 RIPE_ATLAS_API_KEY = os.environ.get("RIPE_ATLAS_API_KEY", "")
@@ -332,29 +330,9 @@ async def run_reverse(ips: List[str], ipinfo_token: str) -> Dict:
             })["responsive_ips"].append(r["ip"])
     return {"routable_asns": list(asn_map.values()), "all_records": results}
 
-# ---------- Proxy scanning (masscan or async) ----------
-async def scan_prefix_with_masscan(prefix: str) -> List[str]:
-    """Use masscan to scan a prefix for open proxy ports."""
-    if not shutil.which("masscan"):
-        return []
-    cmd = ["masscan", prefix, "-p" + ",".join(str(p) for p in PROXY_PORTS), "--rate=1000", "--open-only", "-oJ", "-"]
-    try:
-        proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-        stdout, _ = await proc.communicate()
-        if proc.returncode != 0:
-            return []
-        data = json.loads(stdout)
-        results = []
-        for host in data.get("hosts", []):
-            ip = host.get("ip")
-            for port in host.get("ports", []):
-                results.append(f"{ip}:{port['port']}")
-        return results
-    except:
-        return []
-
+# ---------- Proxy scanning (async) ----------
 async def scan_prefix_async(prefix: str) -> List[str]:
-    """Fallback: async TCP scanning of sample IPs."""
+    """Async TCP scanning of sample IPs from a prefix."""
     net = ipaddress.IPv4Network(prefix, strict=False)
     candidates = []
     for offset in SAMPLE_OFFSETS:
@@ -371,8 +349,7 @@ async def verify_proxy(proxy: str) -> Optional[dict]:
     """Check if proxy works and returns an Iranian exit IP."""
     ip, port = proxy.split(":")
     port = int(port)
-    # Simplified: we can test via requests if exit IP is Iranian.
-    # For brevity, we'll just return working if TCP open and IP in our ASN DB.
+    # Simplified: return working if TCP open and IP in our ASN DB later.
     # Full implementation would use aiohttp with proxy.
     return {"proxy": proxy, "working": True, "exit_verified": False}
 
@@ -384,8 +361,7 @@ async def run_proxy_scanner(asn_db: dict) -> List[dict]:
         if confidence < MIN_CONFIDENCE:
             continue
         for prefix in entry.get("prefixes", []):
-            # Try masscan first, else fallback
-            results = await scan_prefix_with_masscan(prefix) or await scan_prefix_async(prefix)
+            results = await scan_prefix_async(prefix)
             all_candidates.extend(results)
     # Verify each candidate
     verified = []
