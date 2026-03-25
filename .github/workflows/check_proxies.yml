@@ -24,7 +24,7 @@ jobs:
       - name: Install masscan 
         run: sudo apt-get update && sudo apt-get install -y masscan
       - name: Run scanner
-        run: python scan.py --save-intermediates --output merged_routable_asns.json
+        run: python scan.py --use-masscan --save-intermediates --output merged_routable_asns.json
         env:
           RIPE_ATLAS_API_KEY: ${{ secrets.RIPE_ATLAS_API_KEY }}
           IPINFO_TOKEN: ${{ secrets.IPINFO_TOKEN }}
