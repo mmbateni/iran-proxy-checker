@@ -813,8 +813,8 @@ async def main():
         # 1f. BGP neighbour expansion (two-hop)
         first_hop = await expand_via_neighbours(list(SEED_ASNS), min_shared=2)
         working_asns.update(first_hop)
-        second_hop = await expand_two_hop(list(SEED_ASNS), first_hop, min_shared=1)
-        working_asns.update(second_hop)
+        # second_hop = await expand_two_hop(list(SEED_ASNS), first_hop, min_shared=1)
+        # working_asns.update(second_hop)
 
         print(f"\nTotal candidate ASNs before prefix fetch: {len(working_asns)}")
 
