@@ -1,59 +1,45 @@
-name: Iran Proxy Checker
+name: Iran Network Scan
 
 on:
   schedule:
-    - cron: "30 20 * * *"   # 20:30 UTC = 00:00 Tehran (IRST+3:30) / 12:30 Vancouver
+    - cron: "30 20 * * *"   # 20:30 UTC = 00:00 Tehran
   workflow_dispatch:
-    inputs:
-      scan_workers:
-        description: "Concurrent TCP scan workers (default 2000)"
-        default: "2000"
-      scan_tcp_to:
-        description: "TCP scan timeout in seconds (default 0.5)"
-        default: "0.5"
 
 jobs:
-  collect-proxies:
+  scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 50        # scan adds ~2 min; give plenty of headroom
+    timeout-minutes: 60
     permissions:
       contents: write
-
     steps:
-      - uses: actions/checkout@v4.2.2
-
-      - uses: actions/setup-python@v5.6.0
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
-
+          python-version: '3.11'
       - name: Install dependencies
-        run: pip install requests pysocks
-
-      - name: Collect + scan Iranian proxy candidates
-        run: python check_proxies.py
+        run: pip install aiohttp ipaddress
+      - name: Run scanner
+        run: python scan.py --save-intermediates --output merged_routable_asns.json
         env:
-          SKIP_EXIT_VERIFY: 1          # Temporarily skip exit verification
-          MIN_CONFIDENCE: 1
-          COLLECT_ONLY: "1"            # Azure can't reach Iranian IPs for live test
-          FRESH_HOURS: "72"
-          SCAN_WORKERS: ${{ github.event.inputs.scan_workers || '2000' }}
-          SCAN_TCP_TO: ${{ github.event.inputs.scan_tcp_to || '0.5' }}
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4.6.2
+          RIPE_ATLAS_API_KEY: ${{ secrets.RIPE_ATLAS_API_KEY }}
+          IPINFO_TOKEN: ${{ secrets.IPINFO_TOKEN }}
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
         with:
-          name: iran-proxies-${{ github.run_id }}
+          name: scan-results-${{ github.run_id }}
           path: |
+            merged_routable_asns.json
             working_iran_proxies.txt
             working_iran_proxies.json
             hiddify_iran_proxies.json
-            merged_routable_asns.json
-          retention-days: 7
-
-      - name: Commit results
+            atlas_raw.json
+            bgp_raw.json
+            reverse_raw.json
+      - name: Commit and push results
         run: |
-          git config user.name  "github-actions[bot]"
+          git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add working_iran_proxies.txt working_iran_proxies.json hiddify_iran_proxies.json merged_routable_asns.json
-          git diff --cached --quiet || git commit -m "chore: update proxies $(date -u +'%Y-%m-%d %H:%M UTC')"
+          git add merged_routable_asns.json working_iran_proxies.* hiddify_iran_proxies.json
+          git diff --cached --quiet || git commit -m "chore: update results $(date -u +'%Y-%m-%d')"
           git push
