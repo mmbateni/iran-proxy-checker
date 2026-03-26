@@ -818,46 +818,46 @@ async def main():
 
         print(f"\nTotal candidate ASNs before prefix fetch: {len(working_asns)}")
 
-       # ── Phase 2: fetch prefixes concurrently ──
-sem = asyncio.Semaphore(20)  # max 20 parallel RIPE Stat requests
+        # ── Phase 2: fetch prefixes concurrently ──
+        sem = asyncio.Semaphore(20)  # max 20 parallel RIPE Stat requests
 
-async def fetch_one(asn):
-    async with sem:
-        v4, v6 = await fetch_ripe_prefixes(asn)
-        routable_v4 = [p for p in v4 if not is_bogon_prefix(p)]
-        return {
-            "asn": asn,
-            "routable": len(routable_v4) > 0,
-            "routable_prefixes": routable_v4,
-            "routable_prefixes_v6": v6,
-            "all_prefixes": v4,
-            "is_seed": asn in SEED_ASNS,
-            "dns_confirmed": asn in dns_asns,
-            "delegated_confirmed": asn in delegated_asns,
-            "he_confirmed": asn in he_asns,
-            "cf_confirmed": asn in cf_asns,
-        }
+        async def fetch_one(asn):
+            async with sem:
+                v4, v6 = await fetch_ripe_prefixes(asn)
+                routable_v4 = [p for p in v4 if not is_bogon_prefix(p)]
+                return {
+                    "asn": asn,
+                    "routable": len(routable_v4) > 0,
+                    "routable_prefixes": routable_v4,
+                    "routable_prefixes_v6": v6,
+                    "all_prefixes": v4,
+                    "is_seed": asn in SEED_ASNS,
+                    "dns_confirmed": asn in dns_asns,
+                    "delegated_confirmed": asn in delegated_asns,
+                    "he_confirmed": asn in he_asns,
+                    "cf_confirmed": asn in cf_asns,
+                }
 
-print(f"Fetching prefixes for {len(working_asns)} ASNs (parallel) ...")
-bgp_list = await asyncio.gather(*[fetch_one(asn) for asn in working_asns])
-bgp_list = list(bgp_list)
-            # Inject Shadowserver prefixes as a synthetic "extra" entry
-            if shadowserver_prefixes:
-                bgp_list.append({
-                    "asn": 0,  # sentinel for direct prefixes
-                    "routable": True,
-                    "routable_prefixes": shadowserver_prefixes,
-                    "routable_prefixes_v6": [],
-                    "all_prefixes": shadowserver_prefixes,
-                    "is_seed": False,
-                    "dns_confirmed": False,
-                    "delegated_confirmed": False,
-                    "he_confirmed": False,
-                    "cf_confirmed": False,
-                    "source_note": "shadowserver_direct",
-                })
+        print(f"Fetching prefixes for {len(working_asns)} ASNs (parallel) ...")
+        bgp_list = await asyncio.gather(*[fetch_one(asn) for asn in working_asns])
+        bgp_list = list(bgp_list)
+        # Inject Shadowserver prefixes as a synthetic "extra" entry
+        if shadowserver_prefixes:
+            bgp_list.append({
+                "asn": 0,  # sentinel for direct prefixes
+                "routable": True,
+                "routable_prefixes": shadowserver_prefixes,
+                "routable_prefixes_v6": [],
+                "all_prefixes": shadowserver_prefixes,
+                "is_seed": False,
+                "dns_confirmed": False,
+                "delegated_confirmed": False,
+                "he_confirmed": False,
+                "cf_confirmed": False,
+                "source_note": "shadowserver_direct",
+            })
 
-            bgp_res = bgp_list
+        bgp_res = bgp_list
 
         # ── Phase 3: optional Atlas ─────────────────────────────────────────
         if not args.bgp_only and not args.reverse_only and not args.proxy_only:
