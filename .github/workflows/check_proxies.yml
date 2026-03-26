@@ -58,6 +58,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: asn-results-${{ github.run_id }}
+          if-no-files-found: ignore
           path: |
             merged_routable_asns.json
             bgp_raw.json
@@ -67,7 +68,9 @@ jobs:
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add merged_routable_asns.json bgp_raw.json atlas_raw.json
+          git add merged_routable_asns.json
+          [ -f bgp_raw.json ]   && git add bgp_raw.json   || true
+          [ -f atlas_raw.json ] && git add atlas_raw.json || true
           git diff --cached --quiet || git commit -m "chore: refresh ASN database $(date -u +'%Y-%m-%d')"
           git push
 
@@ -126,6 +129,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: proxy-results-${{ github.run_id }}
+          if-no-files-found: ignore
           path: |
             working_iran_proxies.txt
             working_iran_proxies.json
@@ -135,6 +139,8 @@ jobs:
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add working_iran_proxies.txt working_iran_proxies.json hiddify_iran_proxies.json
+          [ -f working_iran_proxies.txt ]  && git add working_iran_proxies.txt  || true
+          [ -f working_iran_proxies.json ] && git add working_iran_proxies.json || true
+          [ -f hiddify_iran_proxies.json ] && git add hiddify_iran_proxies.json || true
           git diff --cached --quiet || git commit -m "chore: update proxies $(date -u +'%Y-%m-%d')"
           git push
