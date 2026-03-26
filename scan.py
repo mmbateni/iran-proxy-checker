@@ -42,6 +42,30 @@ SKIP_EXIT_VERIFY     = os.environ.get("SKIP_EXIT_VERIFY", "").strip() == "1"
 MIN_CONFIDENCE       = int(os.environ.get("MIN_CONFIDENCE", "1"))
 HTTP_TIMEOUT         = int(os.environ.get("HTTP_TIMEOUT", "10"))
 
+# Known Armenian ASNs — carriers with documented BGP peering into Iran
+# ArmenTel (AS12297) ↔ TCI (AS12880); Ucom (AS43733) ↔ MCI (AS197207);
+# VivaCell-MTS (AS44395) ↔ Irancell (AS44244).
+ARMENIA_SEED_ASNS = [
+    12297,   # ArmenTel / Telecom Armenia
+    43733,   # Ucom LLC
+    49800,   # GNC-Alfa CJSC
+    44395,   # VivaCell-MTS (K-Telecom)
+    201354,  # Beeline Armenia
+    60280,   # DataCenter Armenia
+    48716,   # Ucom Broadband
+    197068,  # Rostelecom Armenia
+    206804,  # Arminco LLC
+    210756,  # Armex Technologies
+]
+
+# Armenian domains hosted on Armenian infrastructure (for DNS seeding)
+ARMENIA_SEED_DOMAINS = [
+    "ucom.am", "mts.am", "beeline.am", "rostelecom.am",
+    "armentel.com", "arminco.com", "gnc.am",
+    "ardshinbank.am", "evocabank.am", "inecobank.am",
+    "gov.am", "police.am", "mfa.am",
+]
+
 # Known Iranian ASNs (seed list)
 SEED_ASNS = [
     43754, 62229, 48159, 12880, 16322, 42337, 49666, 21341, 24631,
@@ -771,6 +795,288 @@ def print_summary(merged: dict):
                       f"{len(val['prefixes'])} IPv4 prefixes{v6_str}")
     print(f"\nTotal: {len(merged)} unique routable Iranian ASNs identified.")
 
+# ---------- Armenia-bridge ingestion ----------
+
+def _parse_v2ray_uri_to_proxy_record(uri: str) -> Optional[dict]:
+    """
+    Extract a minimal proxy record from a V2Ray URI string
+    (VMess/VLESS/SS/Trojan/Hysteria2).  Returns None if unparseable.
+    """
+    import base64 as _b64
+    uri = uri.strip()
+    scheme = uri.split("://")[0].lower()
+    try:
+        if scheme == "vmess":
+            raw = uri[8:]
+            raw += "=" * (-len(raw) % 4)
+            obj  = json.loads(_b64.b64decode(raw).decode("utf-8", errors="ignore"))
+            host = str(obj.get("add", "") or obj.get("host", ""))
+            port = int(obj.get("port", 0))
+        elif scheme in ("vless", "trojan", "tuic"):
+            body = uri.split("://", 1)[1]
+            after = body.split("@", 1)[1] if "@" in body else body
+            after = after.split("#")[0].split("?")[0]
+            if after.startswith("["):
+                host = after.split("]")[0][1:]
+                port = int(after.split("]:")[1]) if "]:" in after else 443
+            else:
+                host, port = after.rsplit(":", 1)
+                port = int(port)
+        elif scheme == "ss":
+            body = uri[5:].split("#")[0].split("?")[0]
+            if "@" in body:
+                hp = body.rsplit("@", 1)[1]
+            else:
+                raw = body + "=" * (-len(body) % 4)
+                decoded = _b64.b64decode(raw).decode("utf-8", errors="ignore")
+                hp = decoded.rsplit("@", 1)[1] if "@" in decoded else ""
+            host, port = hp.rsplit(":", 1)
+            port = int(port)
+        elif scheme in ("hysteria2", "hy2"):
+            body = uri.split("://", 1)[1]
+            after = body.split("@", 1)[1] if "@" in body else body
+            after = after.split("#")[0].split("?")[0]
+            host, port = after.rsplit(":", 1)
+            port = int(port)
+        else:
+            return None
+        if not host or not (1 <= port <= 65535):
+            return None
+        return {
+            "proxy":         f"{host}:{port}",
+            "working":       True,
+            "exit_verified": False,
+            "protocol":      scheme,
+            "latency":       None,
+            "country":       "AM",
+            "iran_bridge":   True,
+            "geo_score":     0,
+            "config_uri":    uri,
+        }
+    except Exception:
+        return None
+
+
+def _load_proxies_from_txt(path: str, source_label: str) -> List[dict]:
+    """
+    Read a plain-text file of IP:port proxies (one per line, # comments OK).
+    Each entry becomes a minimal proxy record tagged as an Armenia bridge.
+    """
+    results: List[dict] = []
+    try:
+        with open(path) as f:
+            for raw in f:
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+                # Lines can be:
+                #   ip:port
+                #   PROTOCOL   ip:port   999ms        (check_proxies_armenia format)
+                parts = line.split()
+                # Find the token matching ip:port
+                ip_port = None
+                for token in parts:
+                    m = re.match(r"^(\d{1,3}(?:\.\d{1,3}){3}):(\d{2,5})$", token)
+                    if m:
+                        ip_port = token
+                        break
+                if not ip_port:
+                    continue
+                proto_tok = parts[0].lower() if len(parts) > 1 else "http"
+                proto = proto_tok if proto_tok in ("http", "socks4", "socks5") else "http"
+                results.append({
+                    "proxy":         ip_port,
+                    "working":       True,
+                    "exit_verified": False,
+                    "protocol":      proto,
+                    "latency":       None,
+                    "country":       "AM",
+                    "iran_bridge":   True,
+                    "geo_score":     0,
+                    "source":        source_label,
+                })
+        print(f"  Armenia-bridge [{source_label}]: {len(results)} proxies from {path}")
+    except Exception as e:
+        print(f"  Armenia-bridge [{source_label}]: could not read {path}: {e}")
+    return results
+
+
+def _load_v2ray_uris_from_txt(path: str, source_label: str) -> List[dict]:
+    """
+    Read a plain-text file of V2Ray URIs (one per line, # comments OK).
+    Returns parsed proxy records.
+    """
+    results: List[dict] = []
+    try:
+        with open(path) as f:
+            lines = [l.strip() for l in f if l.strip() and not l.startswith("#")]
+        for uri in lines:
+            rec = _parse_v2ray_uri_to_proxy_record(uri)
+            if rec:
+                rec["source"] = source_label
+                results.append(rec)
+        print(f"  Armenia-bridge [{source_label}]: {len(results)} V2Ray configs from {path}")
+    except Exception as e:
+        print(f"  Armenia-bridge [{source_label}]: could not read {path}: {e}")
+    return results
+
+
+def load_armenia_bridge_proxies() -> List[dict]:
+    """
+    Load working Armenian proxies / V2Ray configs from the committed output
+    files of the two external repos:
+
+      armenia-proxy-checker   → working_armenia_proxies.txt / .json
+                                 armenia_iran_bridge_proxies.txt / .json
+      armenia_v2ray_checker   → working_armenia_configs.txt / .json
+                                 armenia_iran_bridge_configs.txt / .json
+
+    Paths are resolved via environment variables so the caller can point at
+    any directory layout (local checkout, CI workspace subdir, etc.):
+
+      ARMENIA_PROXY_DIR   – root of the armenia-proxy-checker checkout
+                            default: "armenia-proxy-checker"
+      ARMENIA_V2RAY_DIR   – root of the armenia_v2ray_checker checkout
+                            default: "armenia_v2ray_checker"
+
+    When a *_bridge_* file is present it is preferred (already filtered to
+    entries that passed the Iran-bridge test).  When it is absent the plain
+    working_* file is used and ALL entries are treated as potential bridges
+    (appropriate when running on GitHub-hosted runners where the bridge test
+    cannot be performed directly).
+
+    Returns a deduplicated list of proxy dicts compatible with the
+    working_iran_proxies output format.
+    """
+    proxy_dir  = os.environ.get("ARMENIA_PROXY_DIR",  "armenia-proxy-checker")
+    v2ray_dir  = os.environ.get("ARMENIA_V2RAY_DIR",  "armenia_v2ray_checker")
+
+    results:   List[dict] = []
+    seen_keys: set        = set()   # deduplicate on (proxy, protocol)
+
+    def dedup_add(records: List[dict]) -> None:
+        for r in records:
+            key = (r["proxy"], r.get("protocol", ""))
+            if key not in seen_keys:
+                seen_keys.add(key)
+                results.append(r)
+
+    # ── armenia-proxy-checker outputs ──────────────────────────────────────
+    # Prefer the bridge-specific file; fall back to the full working list.
+    bridge_proxy_json = os.path.join(proxy_dir, "armenia_iran_bridge_proxies.json")
+    bridge_proxy_txt  = os.path.join(proxy_dir, "armenia_iran_bridge_proxies.txt")
+    working_proxy_json = os.path.join(proxy_dir, "working_armenia_proxies.json")
+    working_proxy_txt  = os.path.join(proxy_dir, "working_armenia_proxies.txt")
+
+    loaded_proxy = False
+    for (jpath, tpath, label) in [
+        (bridge_proxy_json,  bridge_proxy_txt,  "am-proxy-checker/bridge"),
+        (working_proxy_json, working_proxy_txt, "am-proxy-checker/working"),
+    ]:
+        if loaded_proxy:
+            break
+        if os.path.exists(jpath):
+            try:
+                with open(jpath) as f:
+                    data = json.load(f)
+                # The JSON can have a "proxies" key (bridge format)
+                # or a "verified" key (full working format).
+                entries = data.get("proxies") or data.get("verified") or []
+                recs: List[dict] = []
+                for p in entries:
+                    proxy_str = p.get("proxy", "")
+                    if not proxy_str:
+                        continue
+                    recs.append({
+                        "proxy":         proxy_str,
+                        "working":       True,
+                        "exit_verified": False,
+                        "protocol":      p.get("protocol", "http").lower(),
+                        "latency":       p.get("latency_ms"),
+                        "country":       "AM",
+                        "iran_bridge":   p.get("iran_bridge", True),
+                        "geo_score":     0,
+                        "source":        label,
+                    })
+                if recs:
+                    dedup_add(recs)
+                    print(f"  Armenia-bridge [{label}]: {len(recs)} proxies from {jpath}")
+                    loaded_proxy = True
+                    continue
+            except Exception as e:
+                print(f"  Armenia-bridge [{label}]: JSON error ({jpath}): {e}")
+        if os.path.exists(tpath):
+            recs = _load_proxies_from_txt(tpath, label)
+            if recs:
+                dedup_add(recs)
+                loaded_proxy = True
+
+    if not loaded_proxy:
+        print(f"  Armenia-bridge: no proxy files found under '{proxy_dir}'")
+
+    # ── armenia_v2ray_checker outputs ──────────────────────────────────────
+    bridge_cfg_json  = os.path.join(v2ray_dir, "armenia_iran_bridge_configs.json")
+    bridge_cfg_txt   = os.path.join(v2ray_dir, "armenia_iran_bridge_configs.txt")
+    working_cfg_json = os.path.join(v2ray_dir, "working_armenia_configs.json")
+    working_cfg_txt  = os.path.join(v2ray_dir, "working_armenia_configs.txt")
+
+    loaded_cfg = False
+    for (jpath, tpath, label) in [
+        (bridge_cfg_json,  bridge_cfg_txt,  "am-v2ray-checker/bridge"),
+        (working_cfg_json, working_cfg_txt, "am-v2ray-checker/working"),
+    ]:
+        if loaded_cfg:
+            break
+        if os.path.exists(jpath):
+            try:
+                with open(jpath) as f:
+                    data = json.load(f)
+                # Both bridge and working JSON have a "configs" key with uri field
+                entries = data.get("configs") or data.get("outbounds") or []
+                recs = []
+                for entry in entries:
+                    uri = entry.get("uri") or entry.get("config_uri", "")
+                    if uri:
+                        rec = _parse_v2ray_uri_to_proxy_record(uri)
+                        if rec:
+                            rec["source"] = label
+                            recs.append(rec)
+                    else:
+                        # Hiddify outbound format: server + server_port
+                        srv  = entry.get("server", "")
+                        port = entry.get("server_port", 0)
+                        if srv and port:
+                            recs.append({
+                                "proxy":         f"{srv}:{port}",
+                                "working":       True,
+                                "exit_verified": False,
+                                "protocol":      entry.get("type", "unknown"),
+                                "latency":       entry.get("latency_ms"),
+                                "country":       "AM",
+                                "iran_bridge":   True,
+                                "geo_score":     0,
+                                "source":        label,
+                            })
+                if recs:
+                    dedup_add(recs)
+                    print(f"  Armenia-bridge [{label}]: {len(recs)} configs from {jpath}")
+                    loaded_cfg = True
+                    continue
+            except Exception as e:
+                print(f"  Armenia-bridge [{label}]: JSON error ({jpath}): {e}")
+        if os.path.exists(tpath):
+            recs = _load_v2ray_uris_from_txt(tpath, label)
+            if recs:
+                dedup_add(recs)
+                loaded_cfg = True
+
+    if not loaded_cfg:
+        print(f"  Armenia-bridge: no V2Ray config files found under '{v2ray_dir}'")
+
+    print(f"  Armenia-bridge: {len(results)} total unique bridge entries loaded.")
+    return results
+
+
 # ---------- Main orchestration ----------
 
 async def main():
@@ -780,13 +1086,16 @@ async def main():
     parser.add_argument("--atlas-only",       action="store_true")
     parser.add_argument("--reverse-only",     action="store_true")
     parser.add_argument("--proxy-only",       action="store_true")
+    parser.add_argument("--armenia-bridge",   action="store_true",
+                        help="Ingest Armenia-bridge proxies/configs and merge "
+                             "them into the working proxy output")
     parser.add_argument("--use-masscan",      action="store_true",
                         help="Use masscan for faster port scanning")
     parser.add_argument("--output",           default="merged_routable_asns.json")
     parser.add_argument("--save-intermediates", action="store_true")
     args = parser.parse_args()
 
-    atlas_res = bgp_res = reverse_res = proxy_res = None
+    atlas_res = bgp_res = reverse_res = proxy_res = armenia_bridge_res = None
 
     if not args.reverse_only and not args.proxy_only:
         # ── Phase 1: collect ASNs from all sources ──────────────────────────
@@ -891,6 +1200,11 @@ async def main():
                 asn_db = {}
         proxy_res = await run_proxy_scanner(asn_db, use_masscan=args.use_masscan)
 
+    # ── Armenia-bridge ingestion ────────────────────────────────────────────
+    if args.armenia_bridge:
+        print("\nIngesting Armenia→Iran bridge proxies ...")
+        armenia_bridge_res = load_armenia_bridge_proxies()
+
     # ── Merge & save ────────────────────────────────────────────────────────
     merged = merge_results(atlas_res, bgp_res, reverse_res)
 
@@ -898,6 +1212,13 @@ async def main():
         json.dump(merged, f, indent=2)
 
     if proxy_res:
+        # Merge Armenia-bridge entries into the proxy output
+        if armenia_bridge_res:
+            existing = {p["proxy"] for p in proxy_res}
+            new_bridges = [b for b in armenia_bridge_res if b["proxy"] not in existing]
+            proxy_res = proxy_res + new_bridges
+            print(f"Added {len(new_bridges)} Armenia-bridge proxies to output "
+                  f"({len(proxy_res)} total).")
         with open("working_iran_proxies.txt", "w") as f:
             for p in proxy_res:
                 f.write(p["proxy"] + "\n")
