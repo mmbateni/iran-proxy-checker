@@ -163,6 +163,7 @@ jobs:
             --proxy-only \
             --use-masscan \
             --armenia-bridge \
+            --europe-bridge \
             --save-intermediates \
             --output merged_routable_asns.json
         env:
@@ -171,6 +172,9 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           ARMENIA_V2RAY_DIR:    armenia_v2ray_checker
           ARMENIA_PROXY_DIR:    armenia-proxy-checker
+          # How long to wait for a Bale TCP response through a proxy (seconds).
+          # 5s is generous enough for EU exits; lower if the scan is too slow.
+          BALE_TCP_TIMEOUT:     "5"
 
       - name: Upload proxy artifacts
         uses: actions/upload-artifact@v4
@@ -181,14 +185,18 @@ jobs:
             working_iran_proxies.txt
             working_iran_proxies.json
             hiddify_iran_proxies.json
+            eu_iran_bridge_proxies.txt
+            eu_iran_bridge_proxies.json
 
       - name: Commit and push proxy results
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          [ -f working_iran_proxies.txt ]  && git add working_iran_proxies.txt  || true
-          [ -f working_iran_proxies.json ] && git add working_iran_proxies.json || true
-          [ -f hiddify_iran_proxies.json ] && git add hiddify_iran_proxies.json || true
+          [ -f working_iran_proxies.txt ]     && git add working_iran_proxies.txt     || true
+          [ -f working_iran_proxies.json ]    && git add working_iran_proxies.json    || true
+          [ -f hiddify_iran_proxies.json ]    && git add hiddify_iran_proxies.json    || true
+          [ -f eu_iran_bridge_proxies.txt ]   && git add eu_iran_bridge_proxies.txt   || true
+          [ -f eu_iran_bridge_proxies.json ]  && git add eu_iran_bridge_proxies.json  || true
           git diff --cached --quiet || git commit -m "chore: update proxies $(date -u +'%Y-%m-%d')"
           git stash --include-untracked || true
           git pull --rebase origin main
