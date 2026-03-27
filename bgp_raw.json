@@ -13237,16 +13237,10 @@
   },
   {
     "asn": 214399,
-    "routable": true,
-    "routable_prefixes": [
-      "195.24.236.0/24",
-      "194.39.254.0/24"
-    ],
+    "routable": false,
+    "routable_prefixes": [],
     "routable_prefixes_v6": [],
-    "all_prefixes": [
-      "195.24.236.0/24",
-      "194.39.254.0/24"
-    ],
+    "all_prefixes": [],
     "is_seed": false,
     "dns_confirmed": false,
     "delegated_confirmed": true,
