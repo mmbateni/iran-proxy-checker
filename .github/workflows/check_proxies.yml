@@ -75,7 +75,9 @@ jobs:
           [ -f bgp_raw.json ]   && git add bgp_raw.json   || true
           [ -f atlas_raw.json ] && git add atlas_raw.json || true
           git diff --cached --quiet || git commit -m "chore: refresh ASN database $(date -u +'%Y-%m-%d')"
+          git stash --include-untracked || true
           git pull --rebase origin main
+          git stash pop || true
           git push
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -188,5 +190,7 @@ jobs:
           [ -f working_iran_proxies.json ] && git add working_iran_proxies.json || true
           [ -f hiddify_iran_proxies.json ] && git add hiddify_iran_proxies.json || true
           git diff --cached --quiet || git commit -m "chore: update proxies $(date -u +'%Y-%m-%d')"
+          git stash --include-untracked || true
           git pull --rebase origin main
+          git stash pop || true
           git push
