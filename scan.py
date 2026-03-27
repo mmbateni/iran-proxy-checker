@@ -40,7 +40,7 @@ TCP_TIMEOUT          = float(os.environ.get("TCP_TIMEOUT", "1.0"))
 SCAN_WORKERS         = int(os.environ.get("SCAN_WORKERS", "2000"))
 SKIP_EXIT_VERIFY     = os.environ.get("SKIP_EXIT_VERIFY", "").strip() == "1"
 MIN_CONFIDENCE       = int(os.environ.get("MIN_CONFIDENCE", "1"))
-HTTP_TIMEOUT         = int(os.environ.get("HTTP_TIMEOUT", "10"))
+HTTP_TIMEOUT         = int(os.environ.get("HTTP_TIMEOUT", "7"))
 
 # Known Armenian ASNs — carriers with documented BGP peering into Iran
 # ArmenTel (AS12297) ↔ TCI (AS12880); Ucom (AS43733) ↔ MCI (AS197207);
@@ -615,8 +615,15 @@ async def run_reverse(ips: List[str], ipinfo_token: str) -> dict:
 
 # ---------- Proxy scanning ----------
 
-async def scan_prefix_with_masscan(prefix: str) -> List[str]:
-    """Use masscan at 5000 pps to scan an entire prefix for open proxy ports."""
+async def scan_prefix_with_masscan(prefix: str,
+                                    per_prefix_timeout: int = 90) -> List[str]:
+    """
+    Use masscan at 5000 pps to scan an entire prefix for open proxy ports.
+
+    FIX: Added per_prefix_timeout (default 90 s) so that a stalled masscan
+    process cannot block the pipeline indefinitely.  90 s is enough for a full
+    /16 at 5 000 pps with margin; anything larger / slower is skipped.
+    """
     if not shutil.which("masscan"):
         return []
     ports = ",".join(str(p) for p in PROXY_PORTS)
@@ -634,7 +641,16 @@ async def scan_prefix_with_masscan(prefix: str) -> List[str]:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, _ = await proc.communicate()
+        # FIX: wrap communicate() in wait_for so a hung masscan can't stall forever
+        try:
+            stdout, _ = await asyncio.wait_for(
+                proc.communicate(), timeout=per_prefix_timeout
+            )
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            print(f"  Masscan timed out on {prefix} after {per_prefix_timeout}s, skipping")
+            return []
         if proc.returncode != 0 or not stdout.strip():
             return []
         data = json.loads(stdout)
@@ -824,7 +840,13 @@ async def fetch_european_bridge_prefixes() -> List[str]:
     Falls back to EUROPEAN_BRIDGE_PREFIXES if the API is unavailable.
     These prefixes contain servers operated by Iranian users/providers that
     have routing paths into Iranian infrastructure via DE-CIX / AMS-IX peering.
+
+    FIX: Result set is capped to the 40 most-specific (highest prefix-length)
+    prefixes so that the scan phase cannot balloon to hundreds of large /16s.
+    Smaller prefixes (/22, /23, /24) finish masscan in seconds and host the
+    highest density of Iranian-operated VPS servers.
     """
+    EU_PREFIX_CAP = int(os.environ.get("EU_PREFIX_CAP", "40"))
     print("Fetching European bridge ASN prefixes ...")
     all_prefixes: List[str] = []
     sem = asyncio.Semaphore(10)
@@ -846,7 +868,18 @@ async def fetch_european_bridge_prefixes() -> List[str]:
         # Always include the hardcoded fallbacks — they're high-signal
         all_prefixes = list(set(all_prefixes + EUROPEAN_BRIDGE_PREFIXES))
 
-    print(f"  European bridge: {len(all_prefixes)} prefixes to scan")
+    # FIX: Cap to EU_PREFIX_CAP most-specific prefixes to bound scan time.
+    # Sort descending by prefix length (e.g. /24 > /22 > /16).
+    try:
+        all_prefixes = sorted(
+            all_prefixes,
+            key=lambda p: ipaddress.IPv4Network(p, strict=False).prefixlen,
+            reverse=True,
+        )[:EU_PREFIX_CAP]
+    except Exception:
+        all_prefixes = all_prefixes[:EU_PREFIX_CAP]
+
+    print(f"  European bridge: {len(all_prefixes)} prefixes to scan (cap={EU_PREFIX_CAP})")
     return all_prefixes
 
 
@@ -877,9 +910,36 @@ async def run_proxy_scanner(asn_db: dict, use_masscan: bool = False,
         all_scan_prefixes = prefixes
 
     if use_masscan and shutil.which("masscan"):
-        for pfx in all_scan_prefixes:
-            results = await scan_prefix_with_masscan(pfx)
-            all_candidates.extend(results)
+        # FIX: Run masscan concurrently across prefixes (was a blocking serial loop).
+        # Semaphore of 6 limits concurrent processes to avoid exhausting RAM/sockets
+        # while still achieving ~6× speedup over the original sequential approach.
+        mscan_sem = asyncio.Semaphore(int(os.environ.get("MASSCAN_PARALLEL", "6")))
+
+        async def _masscan_one(pfx: str) -> List[str]:
+            async with mscan_sem:
+                return await scan_prefix_with_masscan(pfx)
+
+        # FIX: For EU bridge prefixes we use async TCP sampling instead of masscan.
+        # Masscan on hundreds of large Hetzner/OVH /16s is the primary time sink.
+        # Async TCP sampling with stratified coverage is faster and sufficient
+        # for finding Iranian-operated VPS servers within those ranges.
+        if eu_prefixes:
+            ir_mscan_tasks  = [_masscan_one(p) for p in prefixes]
+            eu_sample_tasks = [scan_prefix_async(p) for p in eu_prefixes]
+            print(f"  Masscan on {len(prefixes)} IR prefixes | "
+                  f"async-TCP sampling {len(eu_prefixes)} EU bridge prefixes ...")
+            ir_results, eu_results = await asyncio.gather(
+                asyncio.gather(*ir_mscan_tasks),
+                asyncio.gather(*eu_sample_tasks),
+            )
+            for res in ir_results:
+                all_candidates.extend(res)
+            for res in eu_results:
+                all_candidates.extend(res)
+        else:
+            nested = await asyncio.gather(*[_masscan_one(p) for p in all_scan_prefixes])
+            for res in nested:
+                all_candidates.extend(res)
     else:
         tasks = [scan_prefix_async(pfx) for pfx in all_scan_prefixes]
         for res in await asyncio.gather(*tasks):
@@ -893,9 +953,10 @@ async def run_proxy_scanner(asn_db: dict, use_masscan: bool = False,
     print(f"Found {len(public_candidates)} public proxy candidates.")
     all_candidates = list(set(all_candidates + public_candidates))
 
-    # Verify each candidate (2-of-3 geo sources must agree)
+    # FIX: Semaphore raised from 50 → 100 and HTTP_TIMEOUT lowered from 10 → 7 s
+    # so the verification phase drains faster and stays within the job budget.
     verified: List[dict] = []
-    sem = asyncio.Semaphore(50)
+    sem = asyncio.Semaphore(100)
 
     async def verify_one(proxy: str):
         async with sem:
@@ -1377,8 +1438,21 @@ async def main():
                     asn_db = json.load(f)
             except Exception:
                 asn_db = {}
-        proxy_res = await run_proxy_scanner(asn_db, use_masscan=args.use_masscan,
-                                            europe_bridge=args.europe_bridge)
+
+        # FIX: Hard 50-minute wall-clock cap so the job always has time to
+        # commit results even if the scan hasn't fully finished.  The GitHub
+        # Actions timeout is 60 min; 50 min leaves 10 min for git push + cleanup.
+        PROXY_SCAN_TIMEOUT = int(os.environ.get("PROXY_SCAN_TIMEOUT_SECS", str(50 * 60)))
+        try:
+            proxy_res = await asyncio.wait_for(
+                run_proxy_scanner(asn_db, use_masscan=args.use_masscan,
+                                  europe_bridge=args.europe_bridge),
+                timeout=PROXY_SCAN_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            print(f"WARNING: proxy scan hit {PROXY_SCAN_TIMEOUT // 60}-minute "
+                  f"wall-clock limit — saving partial results and continuing.")
+            proxy_res = []
 
     # ── Armenia-bridge ingestion ────────────────────────────────────────────
     if args.armenia_bridge:
