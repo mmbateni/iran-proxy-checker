@@ -1,84 +1,77 @@
 {
-  "log": {
-    "level": "warn",
-    "timestamp": true
-  },
-  "dns": {
-    "servers": [
-      {
-        "tag": "remote",
-        "address": "https://1.1.1.1/dns-query",
-        "detour": "proxy"
-      },
-      {
-        "tag": "local",
-        "address": "local",
-        "detour": "direct"
-      }
-    ],
-    "rules": [
-      {
-        "outbound": "any",
-        "server": "local"
-      }
-    ],
-    "final": "remote",
-    "strategy": "ipv4_only"
-  },
   "outbounds": [
     {
       "type": "http",
-      "tag": "http-5.120.0.25:8080",
-      "server": "5.120.0.25",
-      "server_port": 8080
+      "server": "202.154.18.65",
+      "server_port": 8080,
+      "tag": "proxy-0",
+      "comment": "EU\u2192IR"
     },
     {
       "type": "http",
-      "tag": "http-185.112.32.75:8080",
-      "server": "185.112.32.75",
-      "server_port": 8080
+      "server": "107.181.148.162",
+      "server_port": 6022,
+      "tag": "proxy-1",
+      "comment": "EU\u2192IR"
     },
     {
       "type": "http",
-      "tag": "http-5.115.0.10:8080",
-      "server": "5.115.0.10",
-      "server_port": 8080
+      "server": "107.181.148.106",
+      "server_port": 5966,
+      "tag": "proxy-2",
+      "comment": "EU\u2192IR"
     },
     {
       "type": "http",
-      "tag": "http-5.115.0.10:80",
-      "server": "5.115.0.10",
-      "server_port": 80
+      "server": "193.233.254.82",
+      "server_port": 1080,
+      "tag": "proxy-3",
+      "comment": "EU\u2192IR"
     },
     {
-      "type": "direct",
-      "tag": "direct"
+      "type": "http",
+      "server": "173.245.49.43",
+      "server_port": 80,
+      "tag": "proxy-4",
+      "comment": "EU\u2192IR"
     },
     {
-      "type": "block",
-      "tag": "block"
+      "type": "http",
+      "server": "202.53.171.114",
+      "server_port": 80,
+      "tag": "proxy-5",
+      "comment": "EU\u2192IR"
+    },
+    {
+      "type": "http",
+      "server": "103.151.20.131",
+      "server_port": 80,
+      "tag": "proxy-6",
+      "comment": "EU\u2192IR"
+    },
+    {
+      "type": "http",
+      "server": "195.19.50.151",
+      "server_port": 1080,
+      "tag": "proxy-7",
+      "comment": "EU\u2192IR"
+    },
+    {
+      "type": "http",
+      "server": "173.245.49.42",
+      "server_port": 80,
+      "tag": "proxy-8",
+      "comment": "EU\u2192IR"
+    },
+    {
+      "type": "http",
+      "server": "198.105.122.243",
+      "server_port": 6816,
+      "tag": "proxy-9",
+      "comment": "EU\u2192IR"
     }
   ],
   "route": {
-    "rules": [
-      {
-        "protocol": "dns",
-        "outbound": "dns-out"
-      },
-      {
-        "ip_is_private": true,
-        "outbound": "direct"
-      }
-    ],
-    "final": "proxy",
-    "auto_detect_interface": true
-  },
-  "_info": {
-    "profile_title": "Iran Proxies \u2014 Verified",
-    "generated_at": "2026-03-24 21:07 UTC",
-    "total_proxies": 4,
-    "verified_count": 4,
-    "unverified_count": 0,
-    "avg_latency_ms": 367.6
+    "final": "proxy"
   }
 }
