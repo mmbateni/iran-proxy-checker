@@ -1,5 +1,9 @@
 name: Iran Network Scan
 
+# Schedule:
+#   - ASN discovery runs weekly (Sunday 02:00 UTC) — APIs are quietest then.
+#   - Proxy scan runs daily (02:00 UTC) — reads committed ASN json from repo.
+#   - Both can be triggered manually via workflow_dispatch with a mode selector.
 on:
   schedule:
     - cron: "0 2 * * 0"   # Sunday  02:00 UTC — full ASN discovery
@@ -16,9 +20,20 @@ on:
           - proxy-only    # Re-use committed ASN json, only scan proxies
           - asn-only      # Only refresh ASN/prefix database
 
-jobs:
+# Suppress Node.js 20 deprecation warnings across all jobs.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 # ─────────────────────────────────────────────────────────────────────────────
-# Job 1 – ASN Discovery
+# Shared helper: all commit steps use this to avoid the "fetch first" push
+# rejection when two jobs write to main at nearly the same time.
+# Usage: git pull --rebase origin main && git push
+# ─────────────────────────────────────────────────────────────────────────────
+
+jobs:
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Job 1 – ASN Discovery (weekly or manual full/asn-only)
 # ─────────────────────────────────────────────────────────────────────────────
   discover:
     name: ASN Discovery
@@ -42,17 +57,18 @@ jobs:
       - name: Install Python dependencies
         run: pip install aiohttp aiohttp-socks ipaddress
 
-      - name: Run ASN discovery
+      - name: Run ASN discovery (BGP-only, no proxy scan)
         run: python scan.py --bgp-only --save-intermediates --output merged_routable_asns.json
         env:
           RIPE_ATLAS_API_KEY:   ${{ secrets.RIPE_ATLAS_API_KEY }}
-          IPINFO_TOKEN:          ${{ secrets.IPINFO_TOKEN }}
+          IPINFO_TOKEN:         ${{ secrets.IPINFO_TOKEN }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
 
       - name: Upload ASN artifacts
         uses: actions/upload-artifact@v4
         with:
           name: asn-results-${{ github.run_id }}
+          if-no-files-found: ignore
           path: |
             merged_routable_asns.json
             bgp_raw.json
@@ -66,95 +82,14 @@ jobs:
           [ -f bgp_raw.json ]   && git add bgp_raw.json   || true
           [ -f atlas_raw.json ] && git add atlas_raw.json || true
           git diff --cached --quiet || git commit -m "chore: refresh ASN database $(date -u +'%Y-%m-%d')"
+          git pull --rebase origin main
           git push
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Job 2 – Proxy Scan
-# ─────────────────────────────────────────────────────────────────────────────
-  scan:
-    name: Proxy Scan
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    permissions:
-      contents: write
-
-    needs: [discover]
-    if: |
-      always() &&
-      (github.event_name == 'schedule' ||
-       (github.event_name == 'workflow_dispatch' && github.event.inputs.mode != 'asn-only')) &&
-      (needs.discover.result == 'success' || needs.discover.result == 'skipped')
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: main
-
-      - name: Checkout armenia-proxy-checker outputs
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ vars.ARMENIA_PROXY_REPO || format('{0}/armenia-proxy-checker', github.repository_owner) }}
-          path: armenia-proxy-checker
-          sparse-checkout: |
-            working_armenia_proxies.txt
-            working_armenia_proxies.json
-            armenia_iran_bridge_proxies.txt
-            armenia_iran_bridge_proxies.json
-          token: ${{ secrets.ARMENIA_REPO_TOKEN || github.token }}
-        continue-on-error: true
-
-      - name: Checkout armenia_v2ray_checker outputs
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ vars.ARMENIA_V2RAY_REPO || format('{0}/armenia_v2ray_checker', github.repository_owner) }}
-          path: armenia_v2ray_checker
-          sparse-checkout: |
-            working_armenia_configs.txt
-            working_armenia_configs.json
-            armenia_iran_bridge_configs.txt
-            armenia_iran_bridge_configs.json
-          token: ${{ secrets.ARMENIA_REPO_TOKEN || github.token }}
-        continue-on-error: true
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install Python dependencies
-        run: pip install aiohttp aiohttp-socks ipaddress
-
-      - name: Install masscan
-        run: sudo apt-get update && sudo apt-get install -y masscan
-        continue-on-error: true
-
-      - name: Run proxy scan
-        run: |
-          python scan.py \
-            --proxy-only \
-            --use-masscan \
-            --armenia-bridge \
-            --save-intermediates \
-            --output merged_routable_asns.json
-        env:
-          RIPE_ATLAS_API_KEY:   ${{ secrets.RIPE_ATLAS_API_KEY }}
-          IPINFO_TOKEN:          ${{ secrets.IPINFO_TOKEN }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          ARMENIA_PROXY_DIR:    armenia-proxy-checker
-          ARMENIA_V2RAY_DIR:    armenia_v2ray_checker
-
-      - name: Commit and push proxy results
-        run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          [ -f working_iran_proxies.txt ]  && git add working_iran_proxies.txt  || true
-          [ -f working_iran_proxies.json ] && git add working_iran_proxies.json || true
-          [ -f hiddify_iran_proxies.json ] && git add hiddify_iran_proxies.json || true
-          git diff --cached --quiet || git commit -m "chore: update proxies $(date -u +'%Y-%m-%d')"
-          git push
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Job 3 – Armenia V2Ray Config Collection
+# Job 2 – Armenia V2Ray Config Collection
+# Scrapes 40+ public sources for free V2Ray configs whose exit IP is in Armenia.
+# Runs independently of (and in parallel with) ASN discovery.
+# The scan job (Job 4) depends on this so it can read the committed output.
 # ─────────────────────────────────────────────────────────────────────────────
   armenia-collect:
     name: Armenia V2Ray Collect
@@ -164,22 +99,13 @@ jobs:
       contents: write
 
     if: |
-      always() &&
-      (github.event_name == 'schedule' ||
-       (github.event_name == 'workflow_dispatch' && github.event.inputs.mode != 'asn-only'))
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.mode != 'asn-only')
 
     steps:
       - uses: actions/checkout@v4
         with:
           ref: main
-
-      # Fix: Checkout the actual source repo for the collection script
-      - name: Checkout Armenia V2Ray Script
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ vars.ARMENIA_V2RAY_REPO || format('{0}/armenia_v2ray_checker', github.repository_owner) }}
-          path: scripts_v2ray
-          token: ${{ secrets.ARMENIA_REPO_TOKEN || github.token }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -190,23 +116,28 @@ jobs:
         run: pip install requests aiohttp aiohttp-socks
 
       - name: Collect and verify Armenian V2Ray configs
-        # Run script from the checked-out subdirectory
-        run: python scripts_v2ray/collect_armenia_configs.py
+        run: python collect_armenia_configs.py
         env:
-          SCAN_WORKERS:       "200"
-          SCAN_TCP_TO:        "1.5"
-          SKIP_IRAN_BRIDGE:   "1"
+          SCAN_WORKERS:        "200"
+          SCAN_TCP_TO:         "1.5"
+          # GitHub-hosted runners are on Azure IPs that can't reach Iranian
+          # internal addresses directly, so we skip the bridge probe and mark
+          # all working Armenian configs as potential bridges.
+          SKIP_IRAN_BRIDGE:    "1"
           IRAN_BRIDGE_TIMEOUT: "8"
 
       - name: Upload Armenia config artifacts
         uses: actions/upload-artifact@v4
         with:
           name: armenia-configs-${{ github.run_id }}
+          if-no-files-found: ignore
           path: |
             working_armenia_configs.txt
             working_armenia_configs.json
+            working_armenia_configs_base64.txt
             armenia_iran_bridge_configs.txt
             armenia_iran_bridge_configs.json
+            by_protocol/
 
       - name: Commit Armenia config results
         run: |
@@ -214,13 +145,17 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           [ -f working_armenia_configs.txt ]        && git add working_armenia_configs.txt        || true
           [ -f working_armenia_configs.json ]       && git add working_armenia_configs.json       || true
+          [ -f working_armenia_configs_base64.txt ] && git add working_armenia_configs_base64.txt || true
           [ -f armenia_iran_bridge_configs.txt ]    && git add armenia_iran_bridge_configs.txt    || true
           [ -f armenia_iran_bridge_configs.json ]   && git add armenia_iran_bridge_configs.json   || true
           git diff --cached --quiet || git commit -m "chore: update Armenia V2Ray configs $(date -u +'%Y-%m-%d')"
+          git pull --rebase origin main
           git push
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Job 4 – Armenia Proxy Check (HTTP/SOCKS)
+# Job 3 – Armenia Proxy Check (HTTP/SOCKS)
+# Collects and live-tests fresh HTTP/SOCKS proxies from Armenian IP space.
+# Runs after armenia-collect so its results are available to downstream jobs.
 # ─────────────────────────────────────────────────────────────────────────────
   armenia-check:
     name: Armenia Proxy Check
@@ -241,14 +176,6 @@ jobs:
         with:
           ref: main
 
-      # Fix: Checkout the actual source repo for the checking script
-      - name: Checkout Armenia Proxy Script
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ vars.ARMENIA_PROXY_REPO || format('{0}/armenia-proxy-checker', github.repository_owner) }}
-          path: scripts_proxy
-          token: ${{ secrets.ARMENIA_REPO_TOKEN || github.token }}
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -257,22 +184,138 @@ jobs:
       - name: Install Python dependencies
         run: pip install requests
 
-      - name: Check Armenian proxies
-        # Run script from the checked-out subdirectory
-        run: python scripts_proxy/check_proxies_armenia.py
+      - name: Check Armenian proxies for Iran-bridge capability
+        run: python check_proxies_armenia.py
         env:
           FRESH_HOURS:         "72"
           SCAN_WORKERS:        "60"
           SKIP_IRAN_BRIDGE:    "1"
           IRAN_BRIDGE_TIMEOUT: "10"
 
+      - name: Upload Armenia proxy artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: armenia-proxies-${{ github.run_id }}
+          if-no-files-found: ignore
+          path: |
+            working_armenia_proxies.txt
+            working_armenia_proxies.json
+            armenia_iran_bridge_proxies.txt
+            armenia_iran_bridge_proxies.json
+
       - name: Commit Armenia proxy results
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          [ -f working_armenia_proxies.txt ]        && git add working_armenia_proxies.txt        || true
-          [ -f working_armenia_proxies.json ]       && git add working_armenia_proxies.json       || true
-          [ -f armenia_iran_bridge_proxies.txt ]    && git add armenia_iran_bridge_proxies.txt    || true
-          [ -f armenia_iran_bridge_proxies.json ]   && git add armenia_iran_bridge_proxies.json   || true
+          [ -f working_armenia_proxies.txt ]      && git add working_armenia_proxies.txt      || true
+          [ -f working_armenia_proxies.json ]     && git add working_armenia_proxies.json     || true
+          [ -f armenia_iran_bridge_proxies.txt ]  && git add armenia_iran_bridge_proxies.txt  || true
+          [ -f armenia_iran_bridge_proxies.json ] && git add armenia_iran_bridge_proxies.json || true
           git diff --cached --quiet || git commit -m "chore: update Armenia bridge proxies $(date -u +'%Y-%m-%d')"
+          git pull --rebase origin main
+          git push
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Job 4 – Proxy Scan
+# Reads the freshly committed ASN database + Armenia bridge files and runs the
+# full Iranian proxy scan.  Waits for all three upstream jobs so that:
+#   - merged_routable_asns.json  is current  (from discover, if it ran)
+#   - armenia_iran_bridge_*.json are current (from armenia-collect/armenia-check)
+#
+# File layout used by scan.py --armenia-bridge:
+#   ARMENIA_V2RAY_DIR = "."
+#     The armenia-collect job commits its output files to the root of this
+#     same repo, so after checkout@v4 they are already present in ".".
+#   ARMENIA_PROXY_DIR = "armenia-proxy-checker"
+#     The armenia-proxy-checker is a separate repo; we do a sparse checkout
+#     here.  Set the ARMENIA_PROXY_REPO variable and ARMENIA_REPO_TOKEN secret
+#     in repo Settings if needed (defaults to same-owner/armenia-proxy-checker).
+# ─────────────────────────────────────────────────────────────────────────────
+  scan:
+    name: Proxy Scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
+
+    needs: [discover, armenia-check]
+    if: |
+      always() &&
+      (github.event_name == 'schedule' ||
+       (github.event_name == 'workflow_dispatch' && github.event.inputs.mode != 'asn-only')) &&
+      (needs.discover.result      == 'success' || needs.discover.result      == 'skipped') &&
+      (needs.armenia-check.result == 'success' || needs.armenia-check.result == 'skipped')
+
+    steps:
+      # Pull the latest main so we get:
+      #   - merged_routable_asns.json  pushed by discover
+      #   - armenia_iran_bridge_*.json pushed by armenia-collect / armenia-check
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      # Sparse-checkout the separate armenia-proxy-checker repo.
+      # continue-on-error so the scan still runs if that repo doesn't exist yet.
+      - name: Checkout armenia-proxy-checker outputs
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.ARMENIA_PROXY_REPO || format('{0}/armenia-proxy-checker', github.repository_owner) }}
+          path: armenia-proxy-checker
+          sparse-checkout: |
+            working_armenia_proxies.txt
+            working_armenia_proxies.json
+            armenia_iran_bridge_proxies.txt
+            armenia_iran_bridge_proxies.json
+          sparse-checkout-cone-mode: false
+          token: ${{ secrets.ARMENIA_REPO_TOKEN || github.token }}
+        continue-on-error: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: pip install aiohttp aiohttp-socks ipaddress
+
+      - name: Install masscan
+        continue-on-error: true
+        run: sudo apt-get update && sudo apt-get install -y masscan
+
+      - name: Run proxy scan (with Armenia-bridge ingestion)
+        run: |
+          python scan.py \
+            --proxy-only \
+            --use-masscan \
+            --armenia-bridge \
+            --save-intermediates \
+            --output merged_routable_asns.json
+        env:
+          RIPE_ATLAS_API_KEY:   ${{ secrets.RIPE_ATLAS_API_KEY }}
+          IPINFO_TOKEN:         ${{ secrets.IPINFO_TOKEN }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          # V2Ray bridge files are in the repo root (committed by armenia-collect).
+          ARMENIA_V2RAY_DIR:    "."
+          # HTTP/SOCKS bridge files are in the sparse-checked-out subdir.
+          ARMENIA_PROXY_DIR:    armenia-proxy-checker
+
+      - name: Upload proxy artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: proxy-results-${{ github.run_id }}
+          if-no-files-found: ignore
+          path: |
+            working_iran_proxies.txt
+            working_iran_proxies.json
+            hiddify_iran_proxies.json
+
+      - name: Commit and push proxy results
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          [ -f working_iran_proxies.txt ]  && git add working_iran_proxies.txt  || true
+          [ -f working_iran_proxies.json ] && git add working_iran_proxies.json || true
+          [ -f hiddify_iran_proxies.json ] && git add hiddify_iran_proxies.json || true
+          git diff --cached --quiet || git commit -m "chore: update proxies $(date -u +'%Y-%m-%d')"
+          git pull --rebase origin main
           git push
