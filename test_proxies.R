@@ -721,7 +721,13 @@ if (nrow(intercepted) > 0L) {
   }
 }
 
-out_dir <- tryCatch(dirname(normalizePath(INPUT_FILE)), error=function(e) getwd())
+# In CI, R_OUTPUT_DIR is set to "." so files land in the repo root.
+# Locally it falls back to the directory containing INPUT_FILE.
+out_dir <- {
+  env_dir <- Sys.getenv("R_OUTPUT_DIR", "")
+  if (nzchar(env_dir)) normalizePath(env_dir, mustWork = FALSE)
+  else tryCatch(dirname(normalizePath(INPUT_FILE)), error = function(e) getwd())
+}
 
 if (nrow(ir_exit) > 0L) {
   cat("\nIR-exit proxies (best first):\n")
