@@ -138,15 +138,10 @@ jobs:
       - name: Install Python dependencies
         run: pip install aiohttp aiohttp-socks ipaddress
 
-      - name: Install masscan
-        continue-on-error: true
-        run: sudo apt-get update && sudo apt-get install -y masscan
-
       - name: Run proxy scan (with Armenia-bridge ingestion)
         run: |
           python scan.py \
             --proxy-only \
-            --use-masscan \
             --armenia-bridge \
             --europe-bridge \
             --save-intermediates \
