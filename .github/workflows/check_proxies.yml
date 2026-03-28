@@ -138,10 +138,15 @@ jobs:
       - name: Install Python dependencies
         run: pip install aiohttp aiohttp-socks ipaddress
 
+      - name: Install masscan
+        continue-on-error: true   # non-fatal: falls back to async scanner
+        run: sudo apt-get update && sudo apt-get install -y masscan
+
       - name: Run proxy scan (with Armenia-bridge ingestion)
         run: |
           python scan.py \
             --proxy-only \
+            --use-masscan \
             --armenia-bridge \
             --europe-bridge \
             --save-intermediates \
@@ -153,6 +158,10 @@ jobs:
           ARMENIA_V2RAY_DIR:    armenia_v2ray_checker
           ARMENIA_PROXY_DIR:    armenia-proxy-checker
           BALE_TCP_TIMEOUT:     "5"
+          # Skip slow RIPE Stat fetching for EU ASNs — use hardcoded prefixes only.
+          # Set to 1 to re-enable live fetching (adds ~30s, wider coverage).
+          EU_FETCH_RIPE:        "0"
+          EU_PREFIX_CAP:        "20"
 
       - name: Upload proxy artifacts
         uses: actions/upload-artifact@v4
@@ -235,7 +244,11 @@ jobs:
             --workers 16 \
             --timeout 8
         env:
-          # Ensure output files land in the workspace root
+          # Force output files into the repo root (current working directory).
+          # Without this, dirname(normalizePath("working_iran_proxies.json"))
+          # resolves to the runner workspace root, which is the same place,
+          # but being explicit avoids surprises if the R script is run from
+          # a subdirectory.
           R_OUTPUT_DIR: "."
 
       - name: Upload R verification artifacts
