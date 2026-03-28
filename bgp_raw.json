@@ -14810,10 +14810,14 @@
   },
   {
     "asn": 198341,
-    "routable": false,
-    "routable_prefixes": [],
+    "routable": true,
+    "routable_prefixes": [
+      "5.160.253.0/24"
+    ],
     "routable_prefixes_v6": [],
-    "all_prefixes": [],
+    "all_prefixes": [
+      "5.160.253.0/24"
+    ],
     "is_seed": false,
     "dns_confirmed": false,
     "delegated_confirmed": true,
