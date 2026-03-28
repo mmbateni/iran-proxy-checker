@@ -158,6 +158,56 @@ BOGON_RANGES = [
     "224.0.0.0/4", "240.0.0.0/4", "255.255.255.255/32"
 ]
 
+# CDN anycast ranges — these IPs always have ports open but are NOT proxies.
+# Cloudflare anycast in particular (173.245.48.0/20, 104.16.0.0/13, etc.)
+# geo-locates to CA/US from North America and floods scan results with
+# false positives that pass the TCP-open check but fail all geo verifications.
+# Also filters Akamai, Fastly, and AWS CloudFront anycast blocks.
+CDN_RANGES = [
+    # Cloudflare
+    "173.245.48.0/20",
+    "103.21.244.0/22",
+    "103.22.200.0/22",
+    "103.31.4.0/22",
+    "141.101.64.0/18",
+    "108.162.192.0/18",
+    "190.93.240.0/20",
+    "188.114.96.0/20",
+    "197.234.240.0/22",
+    "198.41.128.0/17",
+    "162.158.0.0/15",
+    "104.16.0.0/13",
+    "104.24.0.0/14",
+    "172.64.0.0/13",
+    "131.0.72.0/22",
+    # Fastly
+    "23.235.32.0/20",
+    "43.249.72.0/22",
+    "103.244.50.0/24",
+    "103.245.222.0/23",
+    "103.245.224.0/24",
+    "104.156.80.0/20",
+    "151.101.0.0/16",
+    "157.52.192.0/18",
+    "167.82.0.0/17",
+    "167.82.128.0/20",
+    "167.82.160.0/20",
+    "167.82.224.0/20",
+    "199.27.72.0/21",
+    # Akamai
+    "23.32.0.0/11",
+    "23.64.0.0/14",
+    "23.192.0.0/11",
+    "96.16.0.0/15",
+    "96.6.0.0/15",
+    "184.24.0.0/13",
+    "184.50.0.0/15",
+    "184.84.0.0/14",
+]
+
+# Build parsed CDN networks once at module load for fast lookup
+_CDN_NETS = [ipaddress.IPv4Network(r, strict=False) for r in CDN_RANGES]
+
 # Proxy ports to scan
 PROXY_PORTS = [80, 443, 1080, 3128, 8080, 8088, 8118, 8888, 9999]
 
@@ -186,11 +236,27 @@ VERIFICATION_TARGETS = [
 
 # ---------- Helper functions ----------
 
+def is_cdn_ip(ip_str: str) -> bool:
+    """Return True if ip_str falls within any known CDN anycast range."""
+    try:
+        ip = ipaddress.IPv4Address(ip_str)
+        return any(ip in net for net in _CDN_NETS)
+    except Exception:
+        return False
+
+def is_cdn_prefix(prefix: str) -> bool:
+    """Return True if prefix overlaps with any known CDN anycast range."""
+    try:
+        net = ipaddress.IPv4Network(prefix, strict=False)
+        return any(net.overlaps(cdn) for cdn in _CDN_NETS)
+    except Exception:
+        return False
+
 def is_bogon(ip_str: str) -> bool:
     try:
         ip = ipaddress.IPv4Address(ip_str)
         return (ip.is_private or ip.is_loopback or ip.is_link_local or
-                ip.is_reserved or ip.is_multicast)
+                ip.is_reserved or ip.is_multicast or is_cdn_ip(ip_str))
     except Exception:
         return True
 
@@ -200,6 +266,8 @@ def is_bogon_prefix(prefix: str) -> bool:
         for b in BOGON_RANGES:
             if net.subnet_of(ipaddress.IPv4Network(b, strict=False)):
                 return True
+        if is_cdn_prefix(prefix):
+            return True
         return False
     except Exception:
         return True
@@ -727,10 +795,22 @@ async def verify_proxy_http(proxy: str, timeout: int = HTTP_TIMEOUT) -> Optional
     """
     Verify proxy by checking 2-of-3 geolocation sources.
     Prevents false positives from accidental open ports on non-proxy services.
+    CDN anycast IPs (Cloudflare, Fastly, Akamai) are rejected immediately —
+    they always have ports open but are not proxies.
     """
     ip, port_str = proxy.rsplit(":", 1)
     port = int(port_str)
+
+    # Reject CDN anycast IPs early — they flood results with false positives
+    if is_cdn_ip(ip):
+        return None
+
     proxy_url = f"http://{ip}:{port}"
+
+    # Randomise target order per proxy so concurrent workers don't all hammer
+    # ip-api.com first — it has a 45 req/min free-tier rate limit.
+    targets = list(VERIFICATION_TARGETS)
+    random.shuffle(targets)
 
     async def check_target(session: aiohttp.ClientSession,
                             url: str, key: str, expected: str) -> bool:
@@ -748,7 +828,7 @@ async def verify_proxy_http(proxy: str, timeout: int = HTTP_TIMEOUT) -> Optional
     async with aiohttp.ClientSession() as session:
         checks = await asyncio.gather(*[
             check_target(session, url, key, expected)
-            for url, key, expected in VERIFICATION_TARGETS
+            for url, key, expected in targets
         ])
     confirmed = sum(checks)
     if confirmed >= 2:
@@ -769,7 +849,7 @@ async def verify_proxy_http(proxy: str, timeout: int = HTTP_TIMEOUT) -> Optional
         async with aiohttp.ClientSession(connector=conn) as session:
             socks_checks = await asyncio.gather(*[
                 check_target(session, url, key, expected)
-                for url, key, expected in VERIFICATION_TARGETS
+                for url, key, expected in targets
             ])
         socks_confirmed = sum(socks_checks)
         if socks_confirmed >= 2:
@@ -781,6 +861,30 @@ async def verify_proxy_http(proxy: str, timeout: int = HTTP_TIMEOUT) -> Optional
                 "latency": None,
                 "country": "IR",
                 "geo_score": socks_confirmed,
+            }
+    except Exception:
+        pass
+
+    # --- SOCKS4 fallback ---
+    # Some Iranian proxies advertise only SOCKS4 (no auth, IPv4 only).
+    try:
+        import aiohttp_socks
+        conn4 = aiohttp_socks.ProxyConnector.from_url(f"socks4://{ip}:{port}")
+        async with aiohttp.ClientSession(connector=conn4) as session:
+            socks4_checks = await asyncio.gather(*[
+                check_target(session, url, key, expected)
+                for url, key, expected in targets
+            ])
+        socks4_confirmed = sum(socks4_checks)
+        if socks4_confirmed >= 2:
+            return {
+                "proxy": proxy,
+                "working": True,
+                "exit_verified": True,
+                "protocol": "socks4",
+                "latency": None,
+                "country": "IR",
+                "geo_score": socks4_confirmed,
             }
     except Exception:
         pass
@@ -1490,6 +1594,13 @@ async def main():
         with open("working_iran_proxies.txt", "w") as f:
             for p in all_usable:
                 f.write(p["proxy"] + "\n")
+
+        # Stamp every proxy entry with the UTC verification time so downstream
+        # tools (e.g. the R tester) can warn when proxies are stale.
+        scan_ts = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+        for p in all_usable:
+            p.setdefault("scan_timestamp", scan_ts)
+
         with open("working_iran_proxies.json", "w") as f:
             json.dump(all_usable, f, indent=2)
 
