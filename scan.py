@@ -732,12 +732,14 @@ async def scan_prefix_with_masscan(prefix: str,
         print(f"  Masscan error on {prefix}: {e}")
         return []
 
-async def scan_prefix_async(prefix: str) -> List[str]:
+async def scan_prefix_async(prefix: str, max_samples: int = 100) -> List[str]:
     """
     Async TCP scanning using stratified sampling across the full prefix.
-    Replaces the old fixed-offset approach that only covered the first 250 IPs.
+    max_samples controls how many IPs are probed per prefix.
+    Use the default (100) for Iranian prefixes; pass 20 for EU bridge prefixes
+    to keep scan time bounded.
     """
-    sample_ips = stratified_sample_ips(prefix, max_samples=100)
+    sample_ips = stratified_sample_ips(prefix, max_samples=max_samples)
     candidates = []
     tasks = []
     ip_port_map = []
@@ -942,40 +944,43 @@ async def scrape_public_proxies() -> List[str]:
 
 async def fetch_european_bridge_prefixes() -> List[str]:
     """
-    Fetch announced prefixes for known European bridge ASNs from RIPE Stat.
-    Falls back to EUROPEAN_BRIDGE_PREFIXES if the API is unavailable.
-    These prefixes contain servers operated by Iranian users/providers that
-    have routing paths into Iranian infrastructure via DE-CIX / AMS-IX peering.
+    Return European bridge prefixes to scan for Iranian-operated proxy servers.
 
-    FIX: Result set is capped to the 40 most-specific (highest prefix-length)
-    prefixes so that the scan phase cannot balloon to hundreds of large /16s.
-    Smaller prefixes (/22, /23, /24) finish masscan in seconds and host the
-    highest density of Iranian-operated VPS servers.
+    By default ONLY the hardcoded EUROPEAN_BRIDGE_PREFIXES list is used —
+    this is instant and avoids 14 sequential RIPE Stat API round-trips that
+    were the primary cause of the 60-minute scan timeout.
+
+    Set env var EU_FETCH_RIPE=1 to additionally fetch live prefixes from RIPE
+    Stat for each EU ASN.  This adds ~30s but gives broader coverage.
+    The result is always capped at EU_PREFIX_CAP (default 20) most-specific
+    prefixes (/24 > /22 > /16) to keep scan time bounded.
     """
-    EU_PREFIX_CAP = int(os.environ.get("EU_PREFIX_CAP", "40"))
-    print("Fetching European bridge ASN prefixes ...")
-    all_prefixes: List[str] = []
-    sem = asyncio.Semaphore(10)
+    EU_PREFIX_CAP   = int(os.environ.get("EU_PREFIX_CAP",   "20"))
+    EU_FETCH_RIPE   = os.environ.get("EU_FETCH_RIPE", "").strip() == "1"
 
-    async def fetch_one(asn: int) -> List[str]:
-        async with sem:
-            v4, _ = await fetch_ripe_prefixes(asn)
-            return [p for p in v4 if not is_bogon_prefix(p)]
+    all_prefixes: List[str] = list(EUROPEAN_BRIDGE_PREFIXES)
 
-    results = await asyncio.gather(*[fetch_one(asn) for asn in EUROPEAN_BRIDGE_ASNS])
-    for r in results:
-        all_prefixes.extend(r)
+    if EU_FETCH_RIPE:
+        print("Fetching European bridge ASN prefixes from RIPE Stat ...")
+        sem = asyncio.Semaphore(10)
+
+        async def fetch_one(asn: int) -> List[str]:
+            async with sem:
+                v4, _ = await fetch_ripe_prefixes(asn)
+                return [p for p in v4 if not is_bogon_prefix(p)]
+
+        ripe_results = await asyncio.gather(
+            *[fetch_one(asn) for asn in EUROPEAN_BRIDGE_ASNS]
+        )
+        for r in ripe_results:
+            all_prefixes.extend(r)
+    else:
+        print("Using hardcoded European bridge prefixes (set EU_FETCH_RIPE=1 for live fetch) ...")
 
     all_prefixes = list(set(all_prefixes))
-    if not all_prefixes:
-        print("  European bridge: RIPE Stat unavailable, using fallback prefixes")
-        all_prefixes = EUROPEAN_BRIDGE_PREFIXES
-    else:
-        # Always include the hardcoded fallbacks — they're high-signal
-        all_prefixes = list(set(all_prefixes + EUROPEAN_BRIDGE_PREFIXES))
 
-    # FIX: Cap to EU_PREFIX_CAP most-specific prefixes to bound scan time.
-    # Sort descending by prefix length (e.g. /24 > /22 > /16).
+    # Cap to the most-specific prefixes — /24s finish masscan in <1s each and
+    # host the highest density of Iranian-operated VPS servers in these ranges.
     try:
         all_prefixes = sorted(
             all_prefixes,
@@ -1025,15 +1030,14 @@ async def run_proxy_scanner(asn_db: dict, use_masscan: bool = False,
             async with mscan_sem:
                 return await scan_prefix_with_masscan(pfx)
 
-        # FIX: For EU bridge prefixes we use async TCP sampling instead of masscan.
-        # Masscan on hundreds of large Hetzner/OVH /16s is the primary time sink.
-        # Async TCP sampling with stratified coverage is faster and sufficient
-        # for finding Iranian-operated VPS servers within those ranges.
+        # EU prefixes: use async TCP sampling with 20 IPs per prefix instead
+        # of masscan — masscan on large Hetzner/OVH blocks is the main time sink,
+        # and 20 stratified samples is enough to find Iranian-operated servers.
         if eu_prefixes:
             ir_mscan_tasks  = [_masscan_one(p) for p in prefixes]
-            eu_sample_tasks = [scan_prefix_async(p) for p in eu_prefixes]
+            eu_sample_tasks = [scan_prefix_async(p, max_samples=20) for p in eu_prefixes]
             print(f"  Masscan on {len(prefixes)} IR prefixes | "
-                  f"async-TCP sampling {len(eu_prefixes)} EU bridge prefixes ...")
+                  f"async-TCP sampling {len(eu_prefixes)} EU bridge prefixes (20 IPs each) ...")
             ir_results, eu_results = await asyncio.gather(
                 asyncio.gather(*ir_mscan_tasks),
                 asyncio.gather(*eu_sample_tasks),
@@ -1047,9 +1051,23 @@ async def run_proxy_scanner(asn_db: dict, use_masscan: bool = False,
             for res in nested:
                 all_candidates.extend(res)
     else:
-        tasks = [scan_prefix_async(pfx) for pfx in all_scan_prefixes]
-        for res in await asyncio.gather(*tasks):
-            all_candidates.extend(res)
+        if eu_prefixes:
+            ir_tasks = [scan_prefix_async(pfx) for pfx in prefixes]
+            eu_tasks = [scan_prefix_async(pfx, max_samples=20) for pfx in eu_prefixes]
+            print(f"  async-TCP: {len(prefixes)} IR prefixes (100 IPs each) | "
+                  f"{len(eu_prefixes)} EU prefixes (20 IPs each) ...")
+            ir_res, eu_res = await asyncio.gather(
+                asyncio.gather(*ir_tasks),
+                asyncio.gather(*eu_tasks),
+            )
+            for res in ir_res:
+                all_candidates.extend(res)
+            for res in eu_res:
+                all_candidates.extend(res)
+        else:
+            tasks = [scan_prefix_async(pfx) for pfx in all_scan_prefixes]
+            for res in await asyncio.gather(*tasks):
+                all_candidates.extend(res)
 
     all_candidates = list(set(all_candidates))
     print(f"Found {len(all_candidates)} candidate proxy endpoints from prefix scan.")
