@@ -1,13 +1,13 @@
 name: Iran Network Scan
 
 # Schedule:
-#   - ASN discovery runs weekly (Sunday 02:00 UTC) — APIs are quietest then.
-#   - Proxy scan runs daily (02:00 UTC) — reads committed ASN json from repo.
-#   - Both can be triggered manually via workflow_dispatch with a mode selector.
+#   - ASN discovery runs weekly (Sunday 02:00 UTC)
+#   - Proxy scan + R verification runs daily (02:00 UTC Mon-Sat)
+#   - Both can be triggered manually via workflow_dispatch
 on:
   schedule:
-    - cron: "0 2 * * 0"   # Sunday  02:00 UTC — full ASN discovery
-    - cron: "0 2 * * 1-6" # Mon–Sat 02:00 UTC — proxy scan only
+    - cron: "0 2 * * 0"   # Sunday  02:00 UTC -- full ASN discovery
+    - cron: "0 2 * * 1-6" # Mon-Sat 02:00 UTC -- proxy scan only
   workflow_dispatch:
     inputs:
       mode:
@@ -16,8 +16,8 @@ on:
         default: "full"
         type: choice
         options:
-          - full          # ASN discovery + proxy scan
-          - proxy-only    # Re-use committed ASN json, only scan proxies
+          - full          # ASN discovery + proxy scan + R verify
+          - proxy-only    # Re-use committed ASN json, scan + R verify
           - asn-only      # Only refresh ASN/prefix database
 
 env:
@@ -25,9 +25,9 @@ env:
 
 jobs:
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Job 1 – ASN Discovery (weekly or manual full/asn-only)
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# Job 1 - ASN Discovery (weekly or manual full/asn-only)
+# -----------------------------------------------------------------------------
   discover:
     name: ASN Discovery
     runs-on: ubuntu-latest
@@ -80,24 +80,9 @@ jobs:
           git stash pop || true
           git push
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Job 2 – Proxy Scan
-# Reads:
-#   - merged_routable_asns.json from this repo (written by Job 1)
-#   - Latest committed output files from both Armenia repos (sparse checkout)
-#     These repos run their own independent workflows; we just consume results.
-#
-# Armenia repo layout expected by scan.py --armenia-bridge:
-#   ARMENIA_V2RAY_DIR  = "armenia_v2ray_checker"
-#     → working_armenia_configs.json / armenia_iran_bridge_configs.json
-#   ARMENIA_PROXY_DIR  = "armenia-proxy-checker"
-#     → working_armenia_proxies.json / armenia_iran_bridge_proxies.json
-#
-# Repo name overrides (Settings → Variables):
-#   ARMENIA_V2RAY_REPO  e.g. myorg/armenia_v2ray_checker
-#   ARMENIA_PROXY_REPO  e.g. myorg/armenia-proxy-checker
-# If private, add a PAT with repo-read scope as secret ARMENIA_REPO_TOKEN.
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# Job 2 - Proxy Scan (Python)
+# -----------------------------------------------------------------------------
   scan:
     name: Proxy Scan
     runs-on: ubuntu-latest
@@ -172,8 +157,6 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           ARMENIA_V2RAY_DIR:    armenia_v2ray_checker
           ARMENIA_PROXY_DIR:    armenia-proxy-checker
-          # How long to wait for a Bale TCP response through a proxy (seconds).
-          # 5s is generous enough for EU exits; lower if the scan is too slow.
           BALE_TCP_TIMEOUT:     "5"
 
       - name: Upload proxy artifacts
@@ -192,12 +175,104 @@ jobs:
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          [ -f working_iran_proxies.txt ]     && git add working_iran_proxies.txt     || true
-          [ -f working_iran_proxies.json ]    && git add working_iran_proxies.json    || true
-          [ -f hiddify_iran_proxies.json ]    && git add hiddify_iran_proxies.json    || true
-          [ -f eu_iran_bridge_proxies.txt ]   && git add eu_iran_bridge_proxies.txt   || true
-          [ -f eu_iran_bridge_proxies.json ]  && git add eu_iran_bridge_proxies.json  || true
+          [ -f working_iran_proxies.txt ]    && git add working_iran_proxies.txt    || true
+          [ -f working_iran_proxies.json ]   && git add working_iran_proxies.json   || true
+          [ -f hiddify_iran_proxies.json ]   && git add hiddify_iran_proxies.json   || true
+          [ -f eu_iran_bridge_proxies.txt ]  && git add eu_iran_bridge_proxies.txt  || true
+          [ -f eu_iran_bridge_proxies.json ] && git add eu_iran_bridge_proxies.json || true
           git diff --cached --quiet || git commit -m "chore: update proxies $(date -u +'%Y-%m-%d')"
+          git stash --include-untracked || true
+          git pull --rebase origin main
+          git stash pop || true
+          git push
+
+# -----------------------------------------------------------------------------
+# Job 3 - R Verification (new)
+# Runs immediately after the Python scan completes.
+# Downloads working_iran_proxies.json produced by Job 2, runs test_proxies.R
+# (with full 4-tier Bale/HTTPS tunnel testing), then commits the ranked output
+# files back to the repo so they are always fresh and available for download.
+#
+# What gets committed:
+#   passing_all_ranked.json      -- all passing proxies, priority-sorted
+#   passing_bale_tunnel.json     -- HTTPS-tunnel-working proxies (browser-ready)
+#   passing_bale_tunnel.txt      -- plain text version for easy use
+#   passing_ir_exit.json         -- confirmed Iranian-exit proxies
+#   passing_bale_tunnel_blocked.json -- tunnel works, Bale blocks IP
+#   passing_bale_bridge.json     -- HTTP-only bridges
+# -----------------------------------------------------------------------------
+  verify:
+    name: R Verification
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+
+    needs: [scan]
+    if: |
+      always() &&
+      needs.scan.result == 'success' &&
+      (github.event_name == 'schedule' ||
+       (github.event_name == 'workflow_dispatch' && github.event.inputs.mode != 'asn-only'))
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      # Pull the freshly committed working_iran_proxies.json from the scan job
+      - name: Pull latest proxy results
+        run: |
+          git pull --rebase origin main
+
+      - name: Set up R
+        uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: "4.3"
+
+      - name: Install R dependencies
+        run: |
+          Rscript -e "install.packages(c('jsonlite', 'parallel'), repos='https://cloud.r-project.org')"
+
+      - name: Run R verification (4-tier Bale/HTTPS tunnel test)
+        run: |
+          Rscript test_proxies.R working_iran_proxies.json \
+            --workers 16 \
+            --timeout 8
+        env:
+          # Ensure output files land in the workspace root
+          R_OUTPUT_DIR: "."
+
+      - name: Upload R verification artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: r-verified-${{ github.run_id }}
+          if-no-files-found: ignore
+          path: |
+            passing_all_ranked.json
+            passing_all_ranked.txt
+            passing_bale_tunnel.json
+            passing_bale_tunnel.txt
+            passing_bale_tunnel_blocked.json
+            passing_bale_tunnel_blocked.txt
+            passing_ir_exit.json
+            passing_ir_exit.txt
+            passing_bale_bridge.json
+            passing_bale_bridge.txt
+
+      - name: Commit R-verified proxy rankings
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          for f in \
+            passing_all_ranked.json      passing_all_ranked.txt \
+            passing_bale_tunnel.json     passing_bale_tunnel.txt \
+            passing_bale_tunnel_blocked.json passing_bale_tunnel_blocked.txt \
+            passing_ir_exit.json         passing_ir_exit.txt \
+            passing_bale_bridge.json     passing_bale_bridge.txt; do
+            [ -f "$f" ] && git add "$f" || true
+          done
+          git diff --cached --quiet || git commit -m "chore: R-verified proxy rankings $(date -u +'%Y-%m-%d %H:%M') UTC"
           git stash --include-untracked || true
           git pull --rebase origin main
           git stash pop || true
