@@ -111,7 +111,7 @@ is_corporate_ip <- function(ip) {
 # Assigns a rough score to each proxy string BEFORE testing, used only to
 # order the input list so the most promising candidates are tested first.
 # Score is based on port pattern and IP octet hints only (no live checks).
-pret??????_score <- function(proxy_str) {
+pretest_score <- function(proxy_str) {
   parts <- strsplit(proxy_str, ":")[[1L]]
   if (length(parts) != 2L) return(0L)
   ip   <- parts[1L]
@@ -578,7 +578,7 @@ total <- length(proxies)
 # Heuristic scoring based on IP range hints and port patterns.
 # Iranian IP ranges score highest, SOCKS ports score higher than HTTP.
 # This means you see useful results sooner without waiting for the full run.
-pre_scores <- vapply(proxies, pret??????_score, integer(1L))
+pre_scores <- vapply(proxies, pretest_score, integer(1L))
 proxies    <- proxies[order(pre_scores, decreasing = TRUE)]
 
 cat(sprintf("Testing %d proxies after filtering (ordered by IR proximity)...\n\n",
