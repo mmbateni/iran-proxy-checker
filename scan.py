@@ -782,10 +782,12 @@ async def check_bale_reachable(proxy_url: str,
                     allow_redirects=True,
                     ssl=False,
                 ) as resp:
-                    if resp.status < 600:   # any HTTP response = routable
+                    # 407 = proxy auth required: proxy blocked before reaching Bale
+                    if resp.status < 600 and resp.status != 407:
                         return True
-        except aiohttp.ClientResponseError:
-            return True   # got an HTTP error response = still routable
+        except aiohttp.ClientResponseError as e:
+            if e.status != 407:
+                return True   # non-407 error from destination = still routable
         except Exception:
             continue
     return False
