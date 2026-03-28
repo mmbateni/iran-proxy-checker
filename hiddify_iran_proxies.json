@@ -2,71 +2,71 @@
   "outbounds": [
     {
       "type": "http",
-      "server": "196.1.93.10",
-      "server_port": 80,
+      "server": "13.36.243.194",
+      "server_port": 9899,
       "tag": "proxy-0",
       "comment": "EU\u2192IR"
     },
     {
       "type": "http",
-      "server": "4.213.98.253",
-      "server_port": 80,
+      "server": "103.65.237.92",
+      "server_port": 5678,
       "tag": "proxy-1",
       "comment": "EU\u2192IR"
     },
     {
       "type": "http",
-      "server": "150.109.236.146",
+      "server": "98.64.128.182",
       "server_port": 3128,
       "tag": "proxy-2",
       "comment": "EU\u2192IR"
     },
     {
       "type": "http",
-      "server": "124.108.6.20",
-      "server_port": 8085,
+      "server": "157.230.40.79",
+      "server_port": 8080,
       "tag": "proxy-3",
       "comment": "EU\u2192IR"
     },
     {
       "type": "http",
-      "server": "103.151.20.131",
-      "server_port": 80,
+      "server": "203.95.196.41",
+      "server_port": 8080,
       "tag": "proxy-4",
       "comment": "EU\u2192IR"
     },
     {
       "type": "http",
-      "server": "152.228.217.116",
-      "server_port": 80,
+      "server": "116.80.49.165",
+      "server_port": 3172,
       "tag": "proxy-5",
       "comment": "EU\u2192IR"
     },
     {
       "type": "http",
-      "server": "133.232.90.156",
-      "server_port": 80,
+      "server": "187.190.58.152",
+      "server_port": 8081,
       "tag": "proxy-6",
       "comment": "EU\u2192IR"
     },
     {
       "type": "http",
-      "server": "116.80.65.78",
-      "server_port": 3172,
+      "server": "191.101.1.116",
+      "server_port": 80,
       "tag": "proxy-7",
       "comment": "EU\u2192IR"
     },
     {
       "type": "http",
-      "server": "159.65.221.25",
+      "server": "97.74.87.226",
       "server_port": 80,
       "tag": "proxy-8",
       "comment": "EU\u2192IR"
     },
     {
       "type": "http",
-      "server": "90.156.169.153",
-      "server_port": 1080,
+      "server": "8.219.191.219",
+      "server_port": 8118,
       "tag": "proxy-9",
       "comment": "EU\u2192IR"
     }
