@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Iran Network Scanner – Enhanced Edition v2
+Iran Network Scanner - Enhanced Edition v2
 ============================================
 Robust discovery of routable Iranian ASNs and working proxies.
 
@@ -42,9 +42,9 @@ SKIP_EXIT_VERIFY     = os.environ.get("SKIP_EXIT_VERIFY", "").strip() == "1"
 MIN_CONFIDENCE       = int(os.environ.get("MIN_CONFIDENCE", "1"))
 HTTP_TIMEOUT         = int(os.environ.get("HTTP_TIMEOUT", "7"))
 
-# Known Armenian ASNs — carriers with documented BGP peering into Iran
-# ArmenTel (AS12297) ↔ TCI (AS12880); Ucom (AS43733) ↔ MCI (AS197207);
-# VivaCell-MTS (AS44395) ↔ Irancell (AS44244).
+# Known Armenian ASNs - carriers with documented BGP peering into Iran
+# ArmenTel (AS12297) -> TCI (AS12880); Ucom (AS43733) -> MCI (AS197207);
+# VivaCell-MTS (AS44395) -> Irancell (AS44244).
 ARMENIA_SEED_ASNS = [
     12297,   # ArmenTel / Telecom Armenia
     43733,   # Ucom LLC
@@ -66,7 +66,7 @@ ARMENIA_SEED_DOMAINS = [
     "gov.am", "police.am", "mfa.am",
 ]
 
-# ── European bridge configuration ─────────────────────────────────────────────
+# -- European bridge configuration ---------------------------------------------
 # Bale (bale.ai) is an Iranian messaging platform reachable from European IPs
 # (confirmed: Germany) but NOT from North America (Azure/GitHub runner IPs).
 # This asymmetry makes Bale a reliable application-level probe: any proxy
@@ -74,13 +74,13 @@ ARMENIA_SEED_DOMAINS = [
 # regardless of whether the exit IP geo-locates to Iran.
 #
 # Verification logic (see verify_proxy_http):
-#   Tier 1 (standard)  – 2-of-3 geo sources agree exit = IR  → accept as IR proxy
-#   Tier 2 (EU bridge) – exit geo = EU AND bale reachable    → accept as EU→IR bridge
-#   Tier 3 (any-geo)   – 1-of-3 geo passes AND bale reachable → accept as unconfirmed bridge
+#   Tier 1 (standard)  - 2-of-3 geo sources agree exit = IR  -> accept as IR proxy
+#   Tier 2 (EU bridge) - exit geo = EU AND bale reachable    -> accept as EU->IR bridge
+#   Tier 3 (any-geo)   - 1-of-3 geo passes AND bale reachable -> accept as unconfirmed bridge
 #
-# TCP connect to these hostnames/ports is sufficient — no auth needed.
+# TCP connect to these hostnames/ports is sufficient - no auth needed.
 BALE_TEST_ENDPOINTS: List[Tuple[str, int]] = [
-    ("tapi.bale.ai",  443),   # Bot API — most reliable, always up
+    ("tapi.bale.ai",  443),   # Bot API - most reliable, always up
     ("bale.ai",       443),   # Main site
     ("bale.ai",        80),   # HTTP fallback
 ]
@@ -92,15 +92,15 @@ BALE_TCP_TIMEOUT = float(os.environ.get("BALE_TCP_TIMEOUT", "5.0"))
 #  - Hetzner, Contabo, etc. are cheap and accept crypto payment
 #  - These IPs are not blocked by Iranian censors (unlike US/UK ranges)
 EUROPEAN_BRIDGE_ASNS: List[int] = [
-    # Germany — primary
+    # Germany - primary
     24940,   # Hetzner Online GmbH (largest Iranian VPS concentration)
     51167,   # Contabo GmbH
     8560,    # IONOS SE (1&1)
     3320,    # Deutsche Telekom AG
     680,     # DFN (German research network, often peered with Iranian unis)
-    13184,   # Adolf Würth GmbH / AS used by several DE ISPs
+    13184,   # Adolf W??rth GmbH / AS used by several DE ISPs
     29066,   # Vodafone Germany
-    # Netherlands — strong DE-CIX / AMS-IX peering into Iran
+    # Netherlands - strong DE-CIX / AMS-IX peering into Iran
     16276,   # OVH SAS (FR/NL DCs)
     60781,   # LeaseWeb Netherlands
     20738,   # Serverius
@@ -158,7 +158,7 @@ BOGON_RANGES = [
     "224.0.0.0/4", "240.0.0.0/4", "255.255.255.255/32"
 ]
 
-# CDN anycast ranges — these IPs always have ports open but are NOT proxies.
+# CDN anycast ranges - these IPs always have ports open but are NOT proxies.
 # Cloudflare anycast in particular (173.245.48.0/20, 104.16.0.0/13, etc.)
 # geo-locates to CA/US from North America and floods scan results with
 # false positives that pass the TCP-open check but fail all geo verifications.
@@ -799,20 +799,20 @@ async def verify_proxy_http(proxy: str, timeout: int = HTTP_TIMEOUT) -> Optional
     """
     Verify proxy by checking 2-of-3 geolocation sources.
     Prevents false positives from accidental open ports on non-proxy services.
-    CDN anycast IPs (Cloudflare, Fastly, Akamai) are rejected immediately —
+    CDN anycast IPs (Cloudflare, Fastly, Akamai) are rejected immediately -
     they always have ports open but are not proxies.
     """
     ip, port_str = proxy.rsplit(":", 1)
     port = int(port_str)
 
-    # Reject CDN anycast IPs early — they flood results with false positives
+    # Reject CDN anycast IPs early - they flood results with false positives
     if is_cdn_ip(ip):
         return None
 
     proxy_url = f"http://{ip}:{port}"
 
     # Randomise target order per proxy so concurrent workers don't all hammer
-    # ip-api.com first — it has a 45 req/min free-tier rate limit.
+    # ip-api.com first - it has a 45 req/min free-tier rate limit.
     targets = list(VERIFICATION_TARGETS)
     random.shuffle(targets)
 
@@ -893,7 +893,7 @@ async def verify_proxy_http(proxy: str, timeout: int = HTTP_TIMEOUT) -> Optional
     except Exception:
         pass
 
-    # --- Tier 2: EU→IR bridge — exit geo ≠ IR but Bale is reachable -----------
+    # --- Tier 2: EU->IR bridge - exit geo ??? IR but Bale is reachable -----------
     # A proxy with a European exit that can reach bale.ai has a routing path
     # into Iranian infrastructure that North American (Azure/GitHub) IPs lack.
     # We accept these as bridge proxies rather than discarding them.
@@ -922,7 +922,7 @@ async def verify_proxy_http(proxy: str, timeout: int = HTTP_TIMEOUT) -> Optional
             "country":        exit_country,   # actual exit country (DE, NL, etc.)
             "geo_score":      confirmed,
             "iran_reachable": True,           # confirmed via Bale probe
-            "bridge_type":    "EU→IR",
+            "bridge_type":    "EU->IR",
         }
 
     return None
@@ -946,7 +946,7 @@ async def fetch_european_bridge_prefixes() -> List[str]:
     """
     Return European bridge prefixes to scan for Iranian-operated proxy servers.
 
-    By default ONLY the hardcoded EUROPEAN_BRIDGE_PREFIXES list is used —
+    By default ONLY the hardcoded EUROPEAN_BRIDGE_PREFIXES list is used -
     this is instant and avoids 14 sequential RIPE Stat API round-trips that
     were the primary cause of the 60-minute scan timeout.
 
@@ -979,7 +979,7 @@ async def fetch_european_bridge_prefixes() -> List[str]:
 
     all_prefixes = list(set(all_prefixes))
 
-    # Cap to the most-specific prefixes — /24s finish masscan in <1s each and
+    # Cap to the most-specific prefixes - /24s finish masscan in <1s each and
     # host the highest density of Iranian-operated VPS servers in these ranges.
     try:
         all_prefixes = sorted(
@@ -1023,7 +1023,7 @@ async def run_proxy_scanner(asn_db: dict, use_masscan: bool = False,
     if use_masscan and shutil.which("masscan"):
         # FIX: Run masscan concurrently across prefixes (was a blocking serial loop).
         # Semaphore of 6 limits concurrent processes to avoid exhausting RAM/sockets
-        # while still achieving ~6× speedup over the original sequential approach.
+        # while still achieving ~6?? speedup over the original sequential approach.
         mscan_sem = asyncio.Semaphore(int(os.environ.get("MASSCAN_PARALLEL", "6")))
 
         async def _masscan_one(pfx: str) -> List[str]:
@@ -1031,7 +1031,7 @@ async def run_proxy_scanner(asn_db: dict, use_masscan: bool = False,
                 return await scan_prefix_with_masscan(pfx)
 
         # EU prefixes: use async TCP sampling with 20 IPs per prefix instead
-        # of masscan — masscan on large Hetzner/OVH blocks is the main time sink,
+        # of masscan - masscan on large Hetzner/OVH blocks is the main time sink,
         # and 20 stratified samples is enough to find Iranian-operated servers.
         if eu_prefixes:
             ir_mscan_tasks  = [_masscan_one(p) for p in prefixes]
@@ -1077,7 +1077,7 @@ async def run_proxy_scanner(asn_db: dict, use_masscan: bool = False,
     print(f"Found {len(public_candidates)} public proxy candidates.")
     all_candidates = list(set(all_candidates + public_candidates))
 
-    # FIX: Semaphore raised from 50 → 100 and HTTP_TIMEOUT lowered from 10 → 7 s
+    # FIX: Semaphore raised from 50 -> 100 and HTTP_TIMEOUT lowered from 10 -> 7 s
     # so the verification phase drains faster and stays within the job budget.
     verified: List[dict] = []
     sem = asyncio.Semaphore(100)
@@ -1148,7 +1148,7 @@ def print_summary(merged: dict):
         label = {3: "VERY HIGH", 2: "HIGH", 1: "POSSIBLE"}[conf]
         filtered = {k: v for k, v in merged.items() if v["confidence"] == conf}
         if filtered:
-            print(f"\nConfidence {conf}/3 — {label} ({len(filtered)} ASNs)")
+            print(f"\nConfidence {conf}/3 - {label} ({len(filtered)} ASNs)")
             for asn, val in filtered.items():
                 v6_count = len(val.get("prefixes_v6", []))
                 v6_str = f"  {v6_count} IPv6" if v6_count else ""
@@ -1287,17 +1287,17 @@ def load_armenia_bridge_proxies() -> List[dict]:
     Load working Armenian proxies / V2Ray configs from the committed output
     files of the two external repos:
 
-      armenia-proxy-checker   → working_armenia_proxies.txt / .json
+      armenia-proxy-checker   -> working_armenia_proxies.txt / .json
                                  armenia_iran_bridge_proxies.txt / .json
-      armenia_v2ray_checker   → working_armenia_configs.txt / .json
+      armenia_v2ray_checker   -> working_armenia_configs.txt / .json
                                  armenia_iran_bridge_configs.txt / .json
 
     Paths are resolved via environment variables so the caller can point at
     any directory layout (local checkout, CI workspace subdir, etc.):
 
-      ARMENIA_PROXY_DIR   – root of the armenia-proxy-checker checkout
+      ARMENIA_PROXY_DIR   - root of the armenia-proxy-checker checkout
                             default: "armenia-proxy-checker"
-      ARMENIA_V2RAY_DIR   – root of the armenia_v2ray_checker checkout
+      ARMENIA_V2RAY_DIR   - root of the armenia_v2ray_checker checkout
                             default: "armenia_v2ray_checker"
 
     When a *_bridge_* file is present it is preferred (already filtered to
@@ -1322,7 +1322,7 @@ def load_armenia_bridge_proxies() -> List[dict]:
                 seen_keys.add(key)
                 results.append(r)
 
-    # ── armenia-proxy-checker outputs ──────────────────────────────────────
+    # -- armenia-proxy-checker outputs --------------------------------------
     # Prefer the bridge-specific file; fall back to the full working list.
     bridge_proxy_json = os.path.join(proxy_dir, "armenia_iran_bridge_proxies.json")
     bridge_proxy_txt  = os.path.join(proxy_dir, "armenia_iran_bridge_proxies.txt")
@@ -1375,7 +1375,7 @@ def load_armenia_bridge_proxies() -> List[dict]:
     if not loaded_proxy:
         print(f"  Armenia-bridge: no proxy files found under '{proxy_dir}'")
 
-    # ── armenia_v2ray_checker outputs ──────────────────────────────────────
+    # -- armenia_v2ray_checker outputs --------------------------------------
     bridge_cfg_json  = os.path.join(v2ray_dir, "armenia_iran_bridge_configs.json")
     bridge_cfg_txt   = os.path.join(v2ray_dir, "armenia_iran_bridge_configs.txt")
     working_cfg_json = os.path.join(v2ray_dir, "working_armenia_configs.json")
@@ -1452,7 +1452,7 @@ async def main():
                              "them into the working proxy output")
     parser.add_argument("--europe-bridge",    action="store_true",
                         help="Also scan European hosting ASNs (Hetzner/Contabo/OVH) "
-                             "and verify proxies via Bale reachability (EU→IR bridges)")
+                             "and verify proxies via Bale reachability (EU->IR bridges)")
     parser.add_argument("--use-masscan",      action="store_true",
                         help="Use masscan for faster port scanning")
     parser.add_argument("--output",           default="merged_routable_asns.json")
@@ -1462,7 +1462,7 @@ async def main():
     atlas_res = bgp_res = reverse_res = proxy_res = armenia_bridge_res = None
 
     if not args.reverse_only and not args.proxy_only:
-        # ── Phase 1: collect ASNs from all sources ──────────────────────────
+        # -- Phase 1: collect ASNs from all sources --------------------------
 
         # 1a. Seed + DNS
         dns_asns = await discover_asns_via_dns()
@@ -1491,7 +1491,7 @@ async def main():
 
         print(f"\nTotal candidate ASNs before prefix fetch: {len(working_asns)}")
 
-        # ── Phase 2: fetch prefixes concurrently ──
+        # -- Phase 2: fetch prefixes concurrently --
         sem = asyncio.Semaphore(20)  # max 20 parallel RIPE Stat requests
 
         async def fetch_one(asn):
@@ -1532,20 +1532,20 @@ async def main():
 
         bgp_res = bgp_list
 
-        # ── Phase 3: optional Atlas ─────────────────────────────────────────
+        # -- Phase 3: optional Atlas -----------------------------------------
         if not args.bgp_only and not args.reverse_only and not args.proxy_only:
             if RIPE_ATLAS_API_KEY:
                 atlas_res = await run_atlas(list(working_asns)[:20], RIPE_ATLAS_API_KEY)
             else:
                 print("RIPE_ATLAS_API_KEY not set, skipping Atlas")
 
-    # ── Reverse lookup ──────────────────────────────────────────────────────
+    # -- Reverse lookup ------------------------------------------------------
     if args.reverse_only and args.candidates:
         with open(args.candidates) as f:
             ips = [line.strip() for line in f if line.strip()]
         reverse_res = await run_reverse(ips, IPINFO_TOKEN)
 
-    # ── Proxy scan ──────────────────────────────────────────────────────────
+    # -- Proxy scan ----------------------------------------------------------
     if args.proxy_only:
         asn_db: dict = {}
         if bgp_res:
@@ -1575,15 +1575,15 @@ async def main():
             )
         except asyncio.TimeoutError:
             print(f"WARNING: proxy scan hit {PROXY_SCAN_TIMEOUT // 60}-minute "
-                  f"wall-clock limit — saving partial results and continuing.")
+                  f"wall-clock limit - saving partial results and continuing.")
             proxy_res = []
 
-    # ── Armenia-bridge ingestion ────────────────────────────────────────────
+    # -- Armenia-bridge ingestion --------------------------------------------
     if args.armenia_bridge:
-        print("\nIngesting Armenia→Iran bridge proxies ...")
+        print("\nIngesting Armenia->Iran bridge proxies ...")
         armenia_bridge_res = load_armenia_bridge_proxies()
 
-    # ── Merge & save ────────────────────────────────────────────────────────
+    # -- Merge & save --------------------------------------------------------
     merged = merge_results(atlas_res, bgp_res, reverse_res)
 
     with open(args.output, "w") as f:
@@ -1598,18 +1598,18 @@ async def main():
             print(f"Added {len(new_bridges)} Armenia-bridge proxies to output "
                   f"({len(proxy_res)} total).")
 
-        # Split into Iranian-exit and EU→IR bridge proxies for separate outputs
+        # Split into Iranian-exit and EU->IR bridge proxies for separate outputs
         ir_proxies  = [p for p in proxy_res if p.get("country") == "IR"]
         eu_bridges  = [p for p in proxy_res
-                       if p.get("bridge_type") == "EU→IR" or
+                       if p.get("bridge_type") == "EU->IR" or
                           (p.get("iran_reachable") and p.get("country") != "IR")]
         am_bridges  = [p for p in proxy_res if p.get("iran_bridge") and
                        p.get("country") == "AM"]
-        all_usable  = proxy_res   # everything — IR exits + all bridge types
+        all_usable  = proxy_res   # everything - IR exits + all bridge types
 
         print(f"Output breakdown: {len(ir_proxies)} IR-exit | "
-              f"{len(eu_bridges)} EU→IR bridges | "
-              f"{len(am_bridges)} AM→IR bridges")
+              f"{len(eu_bridges)} EU->IR bridges | "
+              f"{len(am_bridges)} AM->IR bridges")
 
         with open("working_iran_proxies.txt", "w") as f:
             for p in all_usable:
@@ -1624,18 +1624,7 @@ async def main():
         with open("working_iran_proxies.json", "w") as f:
             json.dump(all_usable, f, indent=2)
 
-        # Separate file for EU bridge proxies (useful for Hiddify / Xray configs)
-        if eu_bridges:
-            with open("eu_iran_bridge_proxies.txt", "w") as f:
-                for p in eu_bridges:
-                    tag = f"  # {p.get('country','EU')} → IR via Bale-verified route"
-                    f.write(p["proxy"] + tag + "\n")
-            with open("eu_iran_bridge_proxies.json", "w") as f:
-                json.dump(eu_bridges, f, indent=2)
-            print(f"Saved {len(eu_bridges)} EU→IR bridge proxies to "
-                  f"eu_iran_bridge_proxies.txt / .json")
-
-        # Hiddify outbound config — prefer IR-exit proxies, pad with bridges
+        # Hiddify outbound config - prefer IR-exit proxies, pad with bridges
         hiddify_pool = (ir_proxies + eu_bridges + am_bridges)[:10]
         hiddify = {
             "outbounds": [{
