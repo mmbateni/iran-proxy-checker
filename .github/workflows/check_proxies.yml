@@ -158,7 +158,7 @@ jobs:
           ARMENIA_V2RAY_DIR:    armenia_v2ray_checker
           ARMENIA_PROXY_DIR:    armenia-proxy-checker
           BALE_TCP_TIMEOUT:     "5"
-          # Skip slow RIPE Stat fetching for EU ASNs — use hardcoded prefixes only.
+          # Skip slow RIPE Stat fetching for EU ASNs - use hardcoded prefixes only.
           # Set to 1 to re-enable live fetching (adds ~30s, wider coverage).
           EU_FETCH_RIPE:        "0"
           EU_PREFIX_CAP:        "20"
@@ -172,8 +172,6 @@ jobs:
             working_iran_proxies.txt
             working_iran_proxies.json
             hiddify_iran_proxies.json
-            eu_iran_bridge_proxies.txt
-            eu_iran_bridge_proxies.json
 
       - name: Commit and push proxy results
         run: |
@@ -182,8 +180,6 @@ jobs:
           [ -f working_iran_proxies.txt ]    && git add working_iran_proxies.txt    || true
           [ -f working_iran_proxies.json ]   && git add working_iran_proxies.json   || true
           [ -f hiddify_iran_proxies.json ]   && git add hiddify_iran_proxies.json   || true
-          [ -f eu_iran_bridge_proxies.txt ]  && git add eu_iran_bridge_proxies.txt  || true
-          [ -f eu_iran_bridge_proxies.json ] && git add eu_iran_bridge_proxies.json || true
           git diff --cached --quiet || git commit -m "chore: update proxies $(date -u +'%Y-%m-%d')"
           git stash --include-untracked || true
           git pull --rebase origin main
