@@ -375,18 +375,37 @@ BALE_HTTPS_TARGET <- "https://web.bale.ai/"
 #   407        -> proxy auth required (useless)
 #
 check_bale_https <- function(proxy_url, timeout_secs) {
+  # ── What this test does ────────────────────────────────────────────────────
+  # Sends HTTP CONNECT web.bale.ai:443 to the proxy, then opens TLS inside the
+  # tunnel — exactly what Chrome/Edge do when you set a system proxy and visit
+  # https://web.bale.ai.
+  #
+  # KEY FIX: --proxytunnel forces curl to use CONNECT instead of plain HTTP
+  # forwarding.  Without it, curl sends GET http://web.bale.ai/ which hits the
+  # Bale echo/debug page (showing REMOTE_ADDR = ...) and returns HTTP 200.
+  # That 200 is indistinguishable from a real success unless we:
+  #   (a) use --proxytunnel so the request is genuinely HTTPS, and
+  #   (b) inspect the response body for the echo-page fingerprint.
+  #
+  # Body content check:
+  #   The echo page always contains "REMOTE_ADDR = " in plain text.
+  #   The real Bale web app returns HTML/JSON — never that string.
+  #   We write the body to a temp file and reject responses containing it.
   curl_bin <- if (.Platform$OS.type == "windows") "curl.exe" else "curl"
-  dev_null <- if (.Platform$OS.type == "windows") "NUL" else "/dev/null"
+  tmp_body <- tempfile(fileext = ".txt")
+  on.exit(unlink(tmp_body), add = TRUE)
 
   args <- c(
     "-s",
-    "-o",  dev_null,
-    "-w",  "%{http_code} %{url_effective}",
+    "-o",  tmp_body,                     # capture body for echo-page detection
+    "-w",  "\n%{http_code} %{url_effective}",  # status+URL on the last line
     "-m",  as.character(timeout_secs),
     "--connect-timeout", "4",
     "-x",  proxy_url,
-    "-k",                # skip TLS cert check - we test tunnel, not cert validity
-    "-L",
+    "--proxytunnel",    # CRITICAL: force HTTP CONNECT (HTTPS tunnel), not plain forwarding
+    "-k",               # skip TLS cert check — we test the tunnel, not cert validity
+    "-L",               # follow redirects inside the tunnel
+    "--max-redirs", "5",
     BALE_HTTPS_TARGET
   )
 
@@ -397,31 +416,53 @@ check_bale_https <- function(proxy_url, timeout_secs) {
   if (inherits(raw, "try-error") || length(raw) == 0L)
     return(list(tunnel = "none", https_status = 0L, https_url = ""))
 
+  # The -w string is appended AFTER the body in stdout; the last non-empty line
+  # holds "%{http_code} %{url_effective}".
   last_line <- trimws(tail(raw[nzchar(trimws(raw))], 1L))
   tokens    <- strsplit(last_line, " ", fixed = TRUE)[[1L]]
   status    <- suppressWarnings(as.integer(tokens[1L]))
-  final_url <- if (length(tokens) >= 2L) paste(tokens[-1L], collapse = " ") else ""
+  final_url <- if (length(tokens) >= 2L) trimws(paste(tokens[-1L], collapse = " ")) else ""
 
   if (is.na(status) || status == 0L)
     return(list(tunnel = "none", https_status = 0L, https_url = ""))
 
-  # Proxy auth - tunnel refused before reaching Bale
+  # Proxy auth required — never forwarded to Bale
   if (status == 407L)
     return(list(tunnel = "auth-required", https_status = 407L, https_url = ""))
 
-  # Interceptor check - final URL should be on bale.ai / web.bale.ai
-  if (is_interceptor_url(final_url))
-    return(list(tunnel = "intercepted", https_status = status, https_url = final_url))
+  # ── Body content check ─────────────────────────────────────────────────────
+  # The Bale echo/debug page (served on plain HTTP) contains "REMOTE_ADDR = ".
+  # If we see this in the body the proxy did NOT establish an HTTPS CONNECT
+  # tunnel — it forwarded a plain HTTP request instead (--proxytunnel was
+  # ignored by the proxy or curl fell back).  Reject immediately.
+  body_text <- tryCatch(
+    paste(readLines(tmp_body, warn = FALSE), collapse = " "),
+    error = function(e) ""
+  )
+  if (grepl("REMOTE_ADDR", body_text, fixed = TRUE))
+    return(list(tunnel = "echo-page", https_status = 0L, https_url = ""))
 
-  # Full success: Bale returned a normal response
+  # ── URL destination check ──────────────────────────────────────────────────
+  # final_url must stay on web.bale.ai / bale.ai.
+  # If it redirected to a corporate login page, reject as interceptor.
+  if (nzchar(final_url)) {
+    if (!grepl("bale\\.ai", final_url, ignore.case = TRUE)) {
+      if (is_interceptor_url(final_url))
+        return(list(tunnel = "intercepted", https_status = status, https_url = final_url))
+      # Redirected to unknown destination — treat as failed
+      return(list(tunnel = "none", https_status = status, https_url = final_url))
+    }
+  }
+
+  # Full success: real Bale response through HTTPS tunnel
   if (status == 200L || (status >= 301L && status <= 399L))
     return(list(tunnel = "open-200", https_status = status, https_url = final_url))
 
-  # Tunnel works but Bale blocks the proxy exit IP (common with non-Iranian IPs)
+  # Tunnel established but Bale blocks this exit IP
   if (status == 401L || status == 403L)
     return(list(tunnel = "open-blocked", https_status = status, https_url = final_url))
 
-  # Any other HTTP response = tunnel worked (server error etc.)
+  # Other HTTP response through a working tunnel (5xx etc.)
   list(tunnel = "open-other", https_status = status, https_url = final_url)
 }
 
@@ -721,13 +762,7 @@ if (nrow(intercepted) > 0L) {
   }
 }
 
-# In CI, R_OUTPUT_DIR is set to "." so files land in the repo root.
-# Locally it falls back to the directory containing INPUT_FILE.
-out_dir <- {
-  env_dir <- Sys.getenv("R_OUTPUT_DIR", "")
-  if (nzchar(env_dir)) normalizePath(env_dir, mustWork = FALSE)
-  else tryCatch(dirname(normalizePath(INPUT_FILE)), error = function(e) getwd())
-}
+out_dir <- tryCatch(dirname(normalizePath(INPUT_FILE)), error=function(e) getwd())
 
 if (nrow(ir_exit) > 0L) {
   cat("\nIR-exit proxies (best first):\n")
