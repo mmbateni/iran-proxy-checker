@@ -2,71 +2,71 @@
   "outbounds": [
     {
       "type": "http",
-      "server": "20.24.43.214",
-      "server_port": 80,
+      "server": "207.180.254.198",
+      "server_port": 8080,
       "tag": "proxy-0",
       "comment": "EU->IR"
     },
     {
       "type": "http",
-      "server": "65.108.203.37",
-      "server_port": 18080,
+      "server": "194.163.179.49",
+      "server_port": 80,
       "tag": "proxy-1",
+      "comment": "EU->IR"
+    },
+    {
+      "type": "http",
+      "server": "46.241.57.29",
+      "server_port": 1080,
+      "tag": "proxy-2",
+      "comment": "EU->IR"
+    },
+    {
+      "type": "http",
+      "server": "84.39.112.144",
+      "server_port": 3128,
+      "tag": "proxy-3",
       "comment": "EU->IR"
     },
     {
       "type": "http",
       "server": "144.91.118.100",
       "server_port": 80,
-      "tag": "proxy-2",
-      "comment": "EU->IR"
-    },
-    {
-      "type": "http",
-      "server": "175.101.240.38",
-      "server_port": 80,
-      "tag": "proxy-3",
-      "comment": "EU->IR"
-    },
-    {
-      "type": "http",
-      "server": "16.78.119.130",
-      "server_port": 443,
       "tag": "proxy-4",
       "comment": "EU->IR"
     },
     {
       "type": "http",
-      "server": "110.77.180.182",
-      "server_port": 80,
+      "server": "95.214.123.200",
+      "server_port": 8080,
       "tag": "proxy-5",
-      "comment": "EU->IR"
-    },
-    {
-      "type": "http",
-      "server": "103.152.9.150",
-      "server_port": 80,
-      "tag": "proxy-6",
       "comment": "EU->IR"
     },
     {
       "type": "http",
       "server": "23.88.44.203",
       "server_port": 80,
+      "tag": "proxy-6",
+      "comment": "EU->IR"
+    },
+    {
+      "type": "http",
+      "server": "135.181.153.145",
+      "server_port": 80,
       "tag": "proxy-7",
       "comment": "EU->IR"
     },
     {
       "type": "http",
-      "server": "213.239.227.50",
-      "server_port": 80,
+      "server": "203.19.38.114",
+      "server_port": 1080,
       "tag": "proxy-8",
       "comment": "EU->IR"
     },
     {
       "type": "http",
-      "server": "89.38.99.47",
-      "server_port": 11578,
+      "server": "173.212.252.202",
+      "server_port": 443,
       "tag": "proxy-9",
       "comment": "EU->IR"
     }
