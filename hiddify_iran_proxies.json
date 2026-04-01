@@ -2,70 +2,70 @@
   "outbounds": [
     {
       "type": "http",
-      "server": "138.201.38.101",
+      "server": "152.228.217.116",
       "server_port": 80,
       "tag": "proxy-0",
       "comment": "EU->IR"
     },
     {
       "type": "http",
-      "server": "144.91.124.202",
-      "server_port": 443,
+      "server": "213.165.58.6",
+      "server_port": 1080,
       "tag": "proxy-1",
       "comment": "EU->IR"
     },
     {
       "type": "http",
-      "server": "173.212.227.50",
+      "server": "135.181.25.153",
       "server_port": 80,
       "tag": "proxy-2",
       "comment": "EU->IR"
     },
     {
       "type": "http",
-      "server": "188.113.182.218",
-      "server_port": 1080,
+      "server": "159.69.25.153",
+      "server_port": 80,
       "tag": "proxy-3",
       "comment": "EU->IR"
     },
     {
       "type": "http",
-      "server": "115.190.91.223",
-      "server_port": 7897,
+      "server": "23.88.121.147",
+      "server_port": 80,
       "tag": "proxy-4",
       "comment": "EU->IR"
     },
     {
       "type": "http",
-      "server": "82.210.56.251",
+      "server": "173.212.230.101",
       "server_port": 80,
       "tag": "proxy-5",
       "comment": "EU->IR"
     },
     {
       "type": "http",
-      "server": "194.163.147.51",
-      "server_port": 443,
+      "server": "123.182.58.142",
+      "server_port": 8089,
       "tag": "proxy-6",
       "comment": "EU->IR"
     },
     {
       "type": "http",
-      "server": "87.98.128.1",
-      "server_port": 443,
+      "server": "122.53.50.112",
+      "server_port": 80,
       "tag": "proxy-7",
       "comment": "EU->IR"
     },
     {
       "type": "http",
-      "server": "128.199.202.122",
-      "server_port": 8080,
+      "server": "141.98.153.86",
+      "server_port": 80,
       "tag": "proxy-8",
       "comment": "EU->IR"
     },
     {
       "type": "http",
-      "server": "89.58.55.33",
+      "server": "177.137.207.166",
       "server_port": 80,
       "tag": "proxy-9",
       "comment": "EU->IR"
