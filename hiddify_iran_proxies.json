@@ -2,70 +2,70 @@
   "outbounds": [
     {
       "type": "http",
-      "server": "177.234.217.83",
-      "server_port": 999,
+      "server": "198.199.86.11",
+      "server_port": 3128,
       "tag": "proxy-0",
       "comment": "EU->IR"
     },
     {
       "type": "http",
-      "server": "37.27.6.46",
-      "server_port": 80,
+      "server": "103.253.145.138",
+      "server_port": 6980,
       "tag": "proxy-1",
       "comment": "EU->IR"
     },
     {
       "type": "http",
-      "server": "85.132.37.9",
-      "server_port": 1313,
+      "server": "51.77.230.89",
+      "server_port": 443,
       "tag": "proxy-2",
       "comment": "EU->IR"
     },
     {
       "type": "http",
-      "server": "138.201.38.101",
-      "server_port": 80,
+      "server": "116.203.139.209",
+      "server_port": 5678,
       "tag": "proxy-3",
       "comment": "EU->IR"
     },
     {
       "type": "http",
-      "server": "201.91.248.67",
-      "server_port": 20183,
+      "server": "128.140.108.199",
+      "server_port": 443,
       "tag": "proxy-4",
       "comment": "EU->IR"
     },
     {
       "type": "http",
-      "server": "159.65.221.25",
-      "server_port": 80,
+      "server": "51.83.140.70",
+      "server_port": 8181,
       "tag": "proxy-5",
       "comment": "EU->IR"
     },
     {
       "type": "http",
-      "server": "173.212.230.101",
-      "server_port": 443,
+      "server": "159.65.230.46",
+      "server_port": 8888,
       "tag": "proxy-6",
       "comment": "EU->IR"
     },
     {
       "type": "http",
-      "server": "136.243.153.145",
-      "server_port": 80,
+      "server": "23.88.6.103",
+      "server_port": 3128,
       "tag": "proxy-7",
       "comment": "EU->IR"
     },
     {
       "type": "http",
-      "server": "218.236.166.96",
-      "server_port": 8888,
+      "server": "213.165.58.6",
+      "server_port": 1080,
       "tag": "proxy-8",
       "comment": "EU->IR"
     },
     {
       "type": "http",
-      "server": "128.140.51.49",
+      "server": "151.236.24.38",
       "server_port": 80,
       "tag": "proxy-9",
       "comment": "EU->IR"
