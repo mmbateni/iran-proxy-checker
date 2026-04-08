@@ -2,71 +2,71 @@
   "outbounds": [
     {
       "type": "http",
-      "server": "38.60.196.214",
-      "server_port": 80,
+      "server": "103.63.190.72",
+      "server_port": 8080,
       "tag": "proxy-0",
       "comment": "EU->IR"
     },
     {
       "type": "http",
-      "server": "65.109.0.1",
+      "server": "144.91.67.52",
       "server_port": 80,
       "tag": "proxy-1",
       "comment": "EU->IR"
     },
     {
       "type": "http",
-      "server": "185.133.239.244",
-      "server_port": 16299,
+      "server": "182.253.73.130",
+      "server_port": 80,
       "tag": "proxy-2",
       "comment": "EU->IR"
     },
     {
       "type": "http",
-      "server": "173.212.239.254",
-      "server_port": 80,
+      "server": "79.110.202.131",
+      "server_port": 8081,
       "tag": "proxy-3",
       "comment": "EU->IR"
     },
     {
       "type": "http",
-      "server": "51.75.243.37",
+      "server": "144.91.67.52",
       "server_port": 443,
       "tag": "proxy-4",
       "comment": "EU->IR"
     },
     {
       "type": "http",
-      "server": "144.91.124.202",
-      "server_port": 80,
+      "server": "193.70.44.203",
+      "server_port": 443,
       "tag": "proxy-5",
       "comment": "EU->IR"
     },
     {
       "type": "http",
-      "server": "157.230.40.79",
-      "server_port": 8080,
+      "server": "173.212.249.151",
+      "server_port": 443,
       "tag": "proxy-6",
       "comment": "EU->IR"
     },
     {
       "type": "http",
-      "server": "170.64.170.204",
-      "server_port": 8080,
+      "server": "51.77.140.197",
+      "server_port": 80,
       "tag": "proxy-7",
       "comment": "EU->IR"
     },
     {
       "type": "http",
-      "server": "85.214.204.79",
+      "server": "173.212.220.204",
       "server_port": 80,
       "tag": "proxy-8",
       "comment": "EU->IR"
     },
     {
       "type": "http",
-      "server": "34.122.187.196",
-      "server_port": 80,
+      "server": "213.165.58.8",
+      "server_port": 1080,
       "tag": "proxy-9",
       "comment": "EU->IR"
     }
