@@ -2,70 +2,70 @@
   "outbounds": [
     {
       "type": "http",
-      "server": "193.70.70.99",
-      "server_port": 80,
+      "server": "95.216.194.46",
+      "server_port": 1080,
       "tag": "proxy-0",
       "comment": "EU->IR"
     },
     {
       "type": "http",
-      "server": "154.16.146.41",
-      "server_port": 80,
+      "server": "195.26.224.49",
+      "server_port": 1080,
       "tag": "proxy-1",
       "comment": "EU->IR"
     },
     {
       "type": "http",
-      "server": "23.88.57.151",
-      "server_port": 8080,
+      "server": "5.9.63.253",
+      "server_port": 80,
       "tag": "proxy-2",
       "comment": "EU->IR"
     },
     {
       "type": "http",
-      "server": "213.239.201.154",
+      "server": "188.34.179.41",
       "server_port": 80,
       "tag": "proxy-3",
       "comment": "EU->IR"
     },
     {
       "type": "http",
-      "server": "13.230.49.39",
-      "server_port": 8080,
+      "server": "51.68.124.241",
+      "server_port": 80,
       "tag": "proxy-4",
       "comment": "EU->IR"
     },
     {
       "type": "http",
-      "server": "128.140.108.199",
-      "server_port": 443,
+      "server": "213.136.86.102",
+      "server_port": 80,
       "tag": "proxy-5",
       "comment": "EU->IR"
     },
     {
       "type": "http",
-      "server": "35.225.22.61",
-      "server_port": 80,
+      "server": "88.198.166.93",
+      "server_port": 443,
       "tag": "proxy-6",
       "comment": "EU->IR"
     },
     {
       "type": "http",
-      "server": "185.135.69.34",
-      "server_port": 80,
+      "server": "201.217.246.178",
+      "server_port": 8080,
       "tag": "proxy-7",
       "comment": "EU->IR"
     },
     {
       "type": "http",
-      "server": "65.109.89.149",
+      "server": "193.70.89.149",
       "server_port": 80,
       "tag": "proxy-8",
       "comment": "EU->IR"
     },
     {
       "type": "http",
-      "server": "213.239.227.50",
+      "server": "5.9.25.153",
       "server_port": 443,
       "tag": "proxy-9",
       "comment": "EU->IR"
