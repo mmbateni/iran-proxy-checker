@@ -2,71 +2,71 @@
   "outbounds": [
     {
       "type": "http",
-      "server": "95.216.194.46",
-      "server_port": 1080,
+      "server": "23.88.38.101",
+      "server_port": 8080,
       "tag": "proxy-0",
       "comment": "EU->IR"
     },
     {
       "type": "http",
-      "server": "195.26.224.49",
-      "server_port": 1080,
+      "server": "173.212.252.202",
+      "server_port": 443,
       "tag": "proxy-1",
       "comment": "EU->IR"
     },
     {
       "type": "http",
-      "server": "5.9.63.253",
+      "server": "23.88.38.101",
       "server_port": 80,
       "tag": "proxy-2",
       "comment": "EU->IR"
     },
     {
       "type": "http",
-      "server": "188.34.179.41",
+      "server": "149.202.179.41",
       "server_port": 80,
       "tag": "proxy-3",
       "comment": "EU->IR"
     },
     {
       "type": "http",
-      "server": "51.68.124.241",
-      "server_port": 80,
+      "server": "23.88.44.203",
+      "server_port": 9999,
       "tag": "proxy-4",
       "comment": "EU->IR"
     },
     {
       "type": "http",
-      "server": "213.136.86.102",
-      "server_port": 80,
+      "server": "142.93.202.130",
+      "server_port": 3128,
       "tag": "proxy-5",
       "comment": "EU->IR"
     },
     {
       "type": "http",
-      "server": "88.198.166.93",
-      "server_port": 443,
+      "server": "59.46.216.131",
+      "server_port": 30001,
       "tag": "proxy-6",
       "comment": "EU->IR"
     },
     {
       "type": "http",
-      "server": "201.217.246.178",
-      "server_port": 8080,
+      "server": "147.45.221.189",
+      "server_port": 1080,
       "tag": "proxy-7",
       "comment": "EU->IR"
     },
     {
       "type": "http",
-      "server": "193.70.89.149",
-      "server_port": 80,
+      "server": "159.69.51.49",
+      "server_port": 443,
       "tag": "proxy-8",
       "comment": "EU->IR"
     },
     {
       "type": "http",
-      "server": "5.9.25.153",
-      "server_port": 443,
+      "server": "150.129.115.253",
+      "server_port": 6667,
       "tag": "proxy-9",
       "comment": "EU->IR"
     }
