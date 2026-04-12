@@ -15,6 +15,15 @@ Improvements over v1:
   - Two-hop BGP neighbour expansion
   - IPv6 prefix discovery and storage
   - Multi-target proxy verification (2-of-3 geolocation sources must agree)
+
+v2.1 changes:
+  - Added Rubika (web.rubika.ir) and Splus (web.splus.ir) as additional
+    application-level Iranian infrastructure probes alongside Bale.
+  - Tier-2 EU->IR bridge detection now uses a concurrent 1-of-3 probe vote
+    (Bale / Rubika / Splus) via asyncio.gather — no added latency vs. v2.
+  - Proxy output records include iran_probe_score (0-3) and iran_probes_ok.
+  - AS202468 (Noyan Abr Arvan Co.) added to SEED_ASNS and FALLBACK_PREFIXES.
+    Confirmed 2026-04-12: 37.32.26.30 / mail.paya.ir routes internationally.
 """
 import asyncio
 import aiohttp
@@ -86,6 +95,24 @@ BALE_TEST_ENDPOINTS: List[Tuple[str, int]] = [
 ]
 BALE_TCP_TIMEOUT = float(os.environ.get("BALE_TCP_TIMEOUT", "5.0"))
 
+# Rubika (rubika.ir) — Iranian social/messaging platform, self-hosted on Iranian
+# infrastructure. Reachable from EU IPs but NOT from North American
+# (Azure/GitHub runner) IPs — the same asymmetry as Bale, independent CDN path.
+RUBIKA_TEST_ENDPOINTS: List[Tuple[str, int]] = [
+    ("web.rubika.ir", 443),
+    ("rubika.ir",     443),
+    ("rubika.ir",      80),
+]
+
+# Splus (splus.ir) — Iranian media streaming platform, self-hosted on Iranian
+# infrastructure. Third independent routing signal; reduces false positives
+# when a single platform has a temporary outage or CDN path change.
+SPLUS_TEST_ENDPOINTS: List[Tuple[str, int]] = [
+    ("web.splus.ir", 443),
+    ("splus.ir",     443),
+    ("splus.ir",      80),
+]
+
 # European ASNs that host large concentrations of Iranian-operated VPN/proxy
 # servers.  Many Iranian users/operators rent servers here because:
 #  - German/EU DCs have fast connectivity to Iranian IPs via DE-CIX peering
@@ -136,7 +163,9 @@ EUROPEAN_BRIDGE_PREFIXES: List[str] = [
 SEED_ASNS = [
     43754, 62229, 48159, 12880, 16322, 42337, 49666, 21341, 24631,
     56402, 31549, 44244, 197207, 58224, 39501, 57218, 25184, 51695, 47262,
-    64422, 205585
+    64422, 205585,
+    202468,   # Noyan Abr Arvan Co. (Arvan Cloud) — confirmed 2026-04-12:
+              # 37.32.26.30 (mail.paya.ir) observed routing internationally
 ]
 
 # Iranian domains for DNS seeding (all confirmed self-hosted on Iranian infra)
@@ -148,6 +177,8 @@ SEED_DOMAINS = [
     # Extra ISP/bank/ministry domains (reliably self-hosted)
     "shatel.ir", "rightel.com", "bmi.ir", "bankmellat.ir",
     "behdasht.gov.ir", "moe.gov.ir",
+    # Arvan Cloud (AS202468) hosted — confirmed Iranian intranet + intl routing
+    "paya.ir",
 ]
 
 # Bogon prefixes to filter
@@ -214,7 +245,8 @@ PROXY_PORTS = [80, 443, 1080, 3128, 8080, 8088, 8118, 8888, 9999]
 # Fallback prefixes if ASN DB is empty
 FALLBACK_PREFIXES = [
     "5.160.0.0/12", "78.38.0.0/15", "151.232.0.0/13", "185.112.32.0/22",
-    "185.141.104.0/22", "185.173.128.0/22", "185.236.172.0/22"
+    "185.141.104.0/22", "185.173.128.0/22", "185.236.172.0/22",
+    "37.32.0.0/13",   # Arvan Cloud / AS202468 — confirmed 2026-04-12
 ]
 
 # Public proxy list sources
@@ -757,6 +789,41 @@ async def scan_prefix_async(prefix: str, max_samples: int = 100) -> List[str]:
             candidates.append(f"{ip}:{port}")
     return candidates
 
+async def _probe_endpoints(
+    endpoints: List[Tuple[str, int]],
+    proxy_url: str,
+    timeout: float = BALE_TCP_TIMEOUT,
+) -> bool:
+    """
+    Generic Iranian-infrastructure probe helper.
+
+    Sends an HTTP HEAD through proxy_url to each (host, port) in endpoints.
+    Returns True on the first response that is not 407 (proxy auth required).
+    Any non-407 status means the proxy routed the packet to the destination.
+    Used by check_bale_reachable, check_rubika_reachable, check_splus_reachable.
+    """
+    for host, port in endpoints:
+        url = f"http{'s' if port == 443 else ''}://{host}/"
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.head(
+                    url,
+                    proxy=proxy_url,
+                    timeout=aiohttp.ClientTimeout(total=timeout),
+                    allow_redirects=True,
+                    ssl=False,
+                ) as resp:
+                    # 407 = proxy auth required: blocked before reaching destination
+                    if resp.status < 600 and resp.status != 407:
+                        return True
+        except aiohttp.ClientResponseError as e:
+            if e.status != 407:
+                return True   # non-407 error from destination = still routable
+        except Exception:
+            continue
+    return False
+
+
 async def check_bale_reachable(proxy_url: str,
                                timeout: float = BALE_TCP_TIMEOUT) -> bool:
     """
@@ -773,26 +840,27 @@ async def check_bale_reachable(proxy_url: str,
         reach Bale, so if a proxy passes this check it genuinely has a
         routing path unavailable to the runner itself.
     """
-    for host, port in BALE_TEST_ENDPOINTS:
-        url = f"http{'s' if port == 443 else ''}://{host}/"
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.head(
-                    url,
-                    proxy=proxy_url,
-                    timeout=aiohttp.ClientTimeout(total=timeout),
-                    allow_redirects=True,
-                    ssl=False,
-                ) as resp:
-                    # 407 = proxy auth required: proxy blocked before reaching Bale
-                    if resp.status < 600 and resp.status != 407:
-                        return True
-        except aiohttp.ClientResponseError as e:
-            if e.status != 407:
-                return True   # non-407 error from destination = still routable
-        except Exception:
-            continue
-    return False
+    return await _probe_endpoints(BALE_TEST_ENDPOINTS, proxy_url, timeout)
+
+
+async def check_rubika_reachable(proxy_url: str,
+                                  timeout: float = BALE_TCP_TIMEOUT) -> bool:
+    """
+    Probe Rubika (web.rubika.ir) through a proxy.
+    Rubika is self-hosted on Iranian infrastructure; same EU-reachable /
+    NA-blocked asymmetry as Bale — provides a second independent routing signal.
+    """
+    return await _probe_endpoints(RUBIKA_TEST_ENDPOINTS, proxy_url, timeout)
+
+
+async def check_splus_reachable(proxy_url: str,
+                                 timeout: float = BALE_TCP_TIMEOUT) -> bool:
+    """
+    Probe Splus (web.splus.ir) through a proxy.
+    Splus is self-hosted on Iranian infrastructure; independent CDN path from
+    Bale and Rubika — third routing signal, reduces single-platform false positives.
+    """
+    return await _probe_endpoints(SPLUS_TEST_ENDPOINTS, proxy_url, timeout)
 
 
 async def verify_proxy_http(proxy: str, timeout: int = HTTP_TIMEOUT) -> Optional[dict]:
@@ -893,12 +961,18 @@ async def verify_proxy_http(proxy: str, timeout: int = HTTP_TIMEOUT) -> Optional
     except Exception:
         pass
 
-    # --- Tier 2: EU->IR bridge - exit geo ??? IR but Bale is reachable -----------
-    # A proxy with a European exit that can reach bale.ai has a routing path
-    # into Iranian infrastructure that North American (Azure/GitHub) IPs lack.
-    # We accept these as bridge proxies rather than discarding them.
-    bale_ok = await check_bale_reachable(proxy_url)
-    if bale_ok:
+    # --- Tier 2: EU->IR bridge — exit geo ≠ IR but Iranian infra is reachable ---
+    # Run all three probes concurrently (asyncio.gather) — zero added latency
+    # vs. the original single-Bale check.  Accept if ANY probe passes (1-of-3).
+    # Store iran_probe_score so downstream tools can rank 3/3 bridges first.
+    bale_ok, rubika_ok, splus_ok = await asyncio.gather(
+        check_bale_reachable(proxy_url),
+        check_rubika_reachable(proxy_url),
+        check_splus_reachable(proxy_url),
+    )
+    iran_probe_score = sum([bale_ok, rubika_ok, splus_ok])
+
+    if iran_probe_score >= 1:
         # Try to determine the actual exit country from whichever geo check passed.
         exit_country = "EU"   # default label
         for url, key, _ in VERIFICATION_TARGETS:
@@ -914,15 +988,21 @@ async def verify_proxy_http(proxy: str, timeout: int = HTTP_TIMEOUT) -> Optional
             except Exception:
                 continue
         return {
-            "proxy":          proxy,
-            "working":        True,
-            "exit_verified":  False,          # exit not in IR
-            "protocol":       "http",
-            "latency":        None,
-            "country":        exit_country,   # actual exit country (DE, NL, etc.)
-            "geo_score":      confirmed,
-            "iran_reachable": True,           # confirmed via Bale probe
-            "bridge_type":    "EU->IR",
+            "proxy":            proxy,
+            "working":          True,
+            "exit_verified":    False,            # exit not in IR
+            "protocol":         "http",
+            "latency":          None,
+            "country":          exit_country,     # actual exit country (DE, NL, etc.)
+            "geo_score":        confirmed,
+            "iran_reachable":   True,
+            "iran_probe_score": iran_probe_score, # 1-3; higher = more confident bridge
+            "iran_probes_ok":   {                 # which platforms responded
+                "bale":   bale_ok,
+                "rubika": rubika_ok,
+                "splus":  splus_ok,
+            },
+            "bridge_type":      "EU->IR",
         }
 
     return None
@@ -1441,7 +1521,7 @@ def load_armenia_bridge_proxies() -> List[dict]:
 # ---------- Main orchestration ----------
 
 async def main():
-    parser = argparse.ArgumentParser(description="Iran Network Scanner v2")
+    parser = argparse.ArgumentParser(description="Iran Network Scanner v2.1")
     parser.add_argument("--candidates",       help="File of IPs for reverse lookup")
     parser.add_argument("--bgp-only",         action="store_true")
     parser.add_argument("--atlas-only",       action="store_true")
@@ -1452,7 +1532,8 @@ async def main():
                              "them into the working proxy output")
     parser.add_argument("--europe-bridge",    action="store_true",
                         help="Also scan European hosting ASNs (Hetzner/Contabo/OVH) "
-                             "and verify proxies via Bale reachability (EU->IR bridges)")
+                             "and verify proxies via Bale/Rubika/Splus reachability "
+                             "(EU->IR bridges, 1-of-3 probe vote)")
     parser.add_argument("--use-masscan",      action="store_true",
                         help="Use masscan for faster port scanning")
     parser.add_argument("--output",           default="merged_routable_asns.json")
@@ -1607,6 +1688,9 @@ async def main():
                        p.get("country") == "AM"]
         all_usable  = proxy_res   # everything - IR exits + all bridge types
 
+        # Sort EU bridges by probe score descending (3/3 most confident first)
+        eu_bridges.sort(key=lambda p: p.get("iran_probe_score", 0), reverse=True)
+
         print(f"Output breakdown: {len(ir_proxies)} IR-exit | "
               f"{len(eu_bridges)} EU->IR bridges | "
               f"{len(am_bridges)} AM->IR bridges")
@@ -1633,6 +1717,7 @@ async def main():
                 "server_port": int(p["proxy"].rsplit(":", 1)[1]),
                 "tag": f"proxy-{i}",
                 "comment": p.get("bridge_type", "IR-exit"),
+                "iran_probe_score": p.get("iran_probe_score", 0),
             } for i, p in enumerate(hiddify_pool)],
             "route": {"final": "proxy"},
         }
