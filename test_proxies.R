@@ -43,6 +43,22 @@ BALE_ENDPOINTS <- c(
   "http://bale.ai/"          # HTTP fallback
 )
 
+# Rubika (rubika.ir) — Iranian social/messaging platform.
+# Same EU-reachable / NA-blocked asymmetry as Bale. Independent CDN path.
+RUBIKA_ENDPOINTS <- c(
+  "https://web.rubika.ir/",
+  "https://rubika.ir/",
+  "http://rubika.ir/"
+)
+
+# Splus (splus.ir) — Iranian media streaming platform.
+# Third independent probe; different CDN path from Bale and Rubika.
+SPLUS_ENDPOINTS <- c(
+  "https://web.splus.ir/",
+  "https://splus.ir/",
+  "http://splus.ir/"
+)
+
 # -- Corporate / intercepting proxy ranges -------------------------------------
 # These IPs route traffic but inject a corporate login wall (Zscaler, Netskope,
 # Palo Alto Prisma, etc.) before forwarding - useless for Iranian network access.
@@ -297,14 +313,13 @@ is_interceptor_url <- function(url) {
     logical(1L)))
 }
 
-check_bale <- function(proxy_url, timeout_secs, bale_endpoints) {
+# Generic Iranian-infra probe helper used by check_bale + new probes.
+check_iranian_infra <- function(proxy_url, timeout_secs, endpoints) {
   curl_bin <- if (.Platform$OS.type == "windows") "curl.exe" else "curl"
-
-  for (ep in bale_endpoints) {
+  for (ep in endpoints) {
     args <- c(
       "-s",
       "-o",  if (.Platform$OS.type == "windows") "NUL" else "/dev/null",
-      # Write BOTH http_code AND url_effective - space-separated, on stdout
       "-w",  "%{http_code} %{url_effective}",
       "-m",  as.character(timeout_secs),
       "--connect-timeout", "3",
@@ -312,51 +327,29 @@ check_bale <- function(proxy_url, timeout_secs, bale_endpoints) {
       "-L",  "--insecure",
       ep
     )
-
     raw <- try(suppressWarnings(
       system2(curl_bin, args, stdout = TRUE, stderr = FALSE)
     ), silent = TRUE)
-
     if (inherits(raw, "try-error") || length(raw) == 0L) next
-
-    # curl writes the -w output AFTER the body (body is discarded),
-    # so the last non-empty line is "STATUS FINAL_URL"
     last_line <- trimws(tail(raw[nzchar(trimws(raw))], 1L))
     tokens    <- strsplit(last_line, " ", fixed = TRUE)[[1L]]
-
     status    <- suppressWarnings(as.integer(tokens[1L]))
     final_url <- if (length(tokens) >= 2L) paste(tokens[-1L], collapse=" ") else ""
-
-    # Layer 1: valid HTTP status
     if (is.na(status) || status <= 0L || status >= 600L) next
-
-    # Layer 3: proxy authentication wall - blocked before reaching Bale
     if (status == 407L) next
-
-    # Layer 2: interceptor redirect detection
-    # If the final URL is no longer on bale.ai, the proxy hijacked the request
-    if (is_interceptor_url(final_url)) {
-      # Record which interceptor caught it so the caller can report it
-      return(list(reachable  = FALSE,
-                  status     = status,
-                  endpoint   = ep,
-                  final_url  = final_url,
-                  intercepted = TRUE))
-    }
-
-    # All three layers passed
-    return(list(reachable   = TRUE,
-                status      = status,
-                endpoint    = ep,
-                final_url   = final_url,
-                intercepted = FALSE))
+    if (is_interceptor_url(final_url))
+      return(list(reachable=FALSE, status=status, endpoint=ep,
+                  final_url=final_url, intercepted=TRUE))
+    return(list(reachable=TRUE, status=status, endpoint=ep,
+                final_url=final_url, intercepted=FALSE))
   }
+  list(reachable=FALSE, status=NA_integer_, endpoint=NA_character_,
+       final_url=NA_character_, intercepted=FALSE)
+}
 
-  list(reachable   = FALSE,
-       status      = NA_integer_,
-       endpoint    = NA_character_,
-       final_url   = NA_character_,
-       intercepted = FALSE)
+check_bale <- function(proxy_url, timeout_secs, bale_endpoints) {
+  # Thin wrapper — preserves original call signature.
+  check_iranian_infra(proxy_url, timeout_secs, bale_endpoints)
 }
 
 # HTTPS CONNECT tunnel target - the actual Bale web client URL browsers need
@@ -513,18 +506,32 @@ test_proxy <- function(proxy_str, timeout_secs, geo_checks) {
                 bale=FALSE, bale_status=NA_integer_,
                 https_status=NA_integer_, https_url=""))
   
-  # -- Tier 2: Bale reachability -------------------------------------------------
-  bale_res <- check_bale(proxy_url, timeout_secs, BALE_ENDPOINTS)
+  # -- Tier 2: Iranian infra probes (Bale + Rubika + Splus, 1-of-3 vote) --------
+  bale_res   <- check_bale(proxy_url, timeout_secs, BALE_ENDPOINTS)
+  rubika_res <- check_iranian_infra(proxy_url, timeout_secs, RUBIKA_ENDPOINTS)
+  splus_res  <- check_iranian_infra(proxy_url, timeout_secs, SPLUS_ENDPOINTS)
 
-  # Intercepted: proxy hijacked the connection (final URL not on bale.ai)
-  if (isTRUE(bale_res$intercepted))
+  iran_probe_score <- sum(c(isTRUE(bale_res$reachable),
+                            isTRUE(rubika_res$reachable),
+                            isTRUE(splus_res$reachable)))
+
+  # Intercepted by a corporate gateway on any probe domain
+  any_intercepted <- isTRUE(bale_res$intercepted) ||
+                     isTRUE(rubika_res$intercepted) ||
+                     isTRUE(splus_res$intercepted)
+  if (any_intercepted) {
+    first_int <- if (isTRUE(bale_res$intercepted)) bale_res
+                 else if (isTRUE(rubika_res$intercepted)) rubika_res
+                 else splus_res
     return(list(proxy=proxy_str, ok=FALSE, tier="intercepted",
                 country=country, score=hits, proto=proto,
-                bale=FALSE, bale_status=bale_res$status,
+                bale=FALSE, bale_status=first_int$status,
+                iran_probe_score=0L,
                 https_status=NA_integer_, https_url="",
-                final_url=bale_res$final_url %||% ""))
+                final_url=first_int$final_url %||% ""))
+  }
 
-  if (isTRUE(bale_res$reachable)) {
+  if (iran_probe_score >= 1L) {
     # Bale responds via plain HTTP - now test whether the proxy supports
     # HTTPS CONNECT (what browsers actually need for web.bale.ai).
     https_res <- check_bale_https(proxy_url, timeout_secs)
@@ -536,17 +543,18 @@ test_proxy <- function(proxy_str, timeout_secs, geo_checks) {
       "bale-bridge"                            # HTTPS CONNECT failed, HTTP only
     )
 
-    return(list(proxy        = proxy_str,
-                ok           = TRUE,
-                tier         = tier,
-                country      = country,
-                score        = hits,
-                proto        = proto,
-                bale         = TRUE,
-                bale_status  = bale_res$status,
-                https_status = https_res$https_status,
-                https_url    = https_res$https_url %||% "",
-                final_url    = bale_res$final_url %||% ""))
+    return(list(proxy             = proxy_str,
+                ok               = TRUE,
+                tier             = tier,
+                country          = country,
+                score            = hits,
+                proto            = proto,
+                bale             = isTRUE(bale_res$reachable),
+                bale_status      = bale_res$status,
+                iran_probe_score = iran_probe_score,
+                https_status     = https_res$https_status,
+                https_url        = https_res$https_url %||% "",
+                final_url        = bale_res$final_url %||% ""))
   }
   
   # -- No tier passed ------------------------------------------------------------
@@ -640,12 +648,14 @@ if (.Platform$OS.type == "windows" && WORKERS > 1L) {
   cl <- makeCluster(cores)
   on.exit(stopCluster(cl), add = TRUE)                   # always clean up
   clusterExport(cl, varlist = c("GEO_CHECKS", "TIMEOUT", "SOCKS5_PORTS",
-                                "BALE_ENDPOINTS", "BALE_HTTPS_TARGET",
+                                "BALE_ENDPOINTS", "RUBIKA_ENDPOINTS",
+                                "SPLUS_ENDPOINTS", "BALE_HTTPS_TARGET",
                                 "IRAN_NEIGHBOR_CC", "IRAN_REGIONAL_CC",
                                 "CORPORATE_RANGES", "INTERCEPTOR_DOMAINS",
                                 "ip_to_int", "is_in_cidr", "is_corporate_ip",
                                 "is_interceptor_url",
-                                "test_proxy", "check_bale", "check_bale_https",
+                                "test_proxy", "check_bale",
+                                "check_iranian_infra", "check_bale_https",
                                 "run_checks", "priority_score", "%||%"),
                 envir = environment())
   clusterEvalQ(cl, suppressPackageStartupMessages(library(jsonlite)))
