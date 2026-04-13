@@ -1,12 +1,12 @@
 name: Iran Network Scan
 
 # Schedule:
-#   - ASN discovery runs weekly (Sunday 02:00 UTC)
+#   - SNI-fronting discovery + ASN discovery run weekly (Sunday 02:00 UTC)
 #   - Proxy scan + R verification runs daily (02:00 UTC Mon-Sat)
-#   - Both can be triggered manually via workflow_dispatch
+#   - All jobs can be triggered manually via workflow_dispatch
 on:
   schedule:
-    - cron: "0 2 * * 0"   # Sunday  02:00 UTC -- full ASN discovery
+    - cron: "0 2 * * 0"   # Sunday  02:00 UTC -- SNI discovery + ASN discovery
     - cron: "0 2 * * 1-6" # Mon-Sat 02:00 UTC -- proxy scan only
   workflow_dispatch:
     inputs:
@@ -16,14 +16,76 @@ on:
         default: "full"
         type: choice
         options:
-          - full          # ASN discovery + proxy scan + R verify
+          - full          # SNI discovery + ASN discovery + proxy scan + R verify
           - proxy-only    # Re-use committed ASN json, scan + R verify
           - asn-only      # Only refresh ASN/prefix database
+          - sni-only      # Only refresh SNI-fronting pairs
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
+
+# -----------------------------------------------------------------------------
+# Job 0 - SNI-Fronting Pair Discovery (weekly or manual full/sni-only)
+#
+# Probes Cloudflare anycast ranges for working (connect_ip, fake_sni) pairs
+# that can front connections to Iranian infrastructure (tapi.bale.ai).
+# These pairs replicate the patterniha domain-fronting technique:
+#   - DPI sees a whitelisted Cloudflare SNI in the TLS ClientHello -> allowed
+#   - Cloudflare routes the payload to Iranian infra via HTTP Host header
+#
+# Output: working_sni_fronting.json (committed to repo, consumed by R verifier)
+# -----------------------------------------------------------------------------
+  sni_discover:
+    name: SNI Fronting Discovery
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+
+    if: |
+      (github.event_name == 'schedule' && github.event.schedule == '0 2 * * 0') ||
+      (github.event_name == 'workflow_dispatch' &&
+       (github.event.inputs.mode == 'full' || github.event.inputs.mode == 'sni-only'))
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: pip install aiohttp aiohttp-socks ipaddress
+
+      - name: Check curl SNI flag support
+        run: |
+          curl --version
+          curl --help all | grep -E "tls-servername|resolve" && echo "curl flags OK" \
+            || echo "WARNING: curl flags may not be available on this runner"
+
+      - name: Discover SNI-fronting pairs
+        run: python scan.py --sni-fronting --output merged_routable_asns.json
+
+      - name: Upload SNI artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: sni-results-${{ github.run_id }}
+          if-no-files-found: ignore
+          path: working_sni_fronting.json
+
+      - name: Commit SNI-fronting pairs
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          [ -f working_sni_fronting.json ] && git add working_sni_fronting.json || true
+          git diff --cached --quiet || git commit -m "chore: refresh SNI-fronting pairs $(date -u +'%Y-%m-%d')"
+          git stash --include-untracked || true
+          git pull --rebase origin main
+          git stash pop || true
+          git push
 
 # -----------------------------------------------------------------------------
 # Job 1 - ASN Discovery (weekly or manual full/asn-only)
@@ -37,7 +99,9 @@ jobs:
 
     if: |
       (github.event_name == 'schedule' && github.event.schedule == '0 2 * * 0') ||
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.mode != 'proxy-only')
+      (github.event_name == 'workflow_dispatch' &&
+       github.event.inputs.mode != 'proxy-only' &&
+       github.event.inputs.mode != 'sni-only')
 
     steps:
       - uses: actions/checkout@v4
@@ -90,12 +154,15 @@ jobs:
     permissions:
       contents: write
 
-    needs: [discover]
+    needs: [sni_discover, discover]
     if: |
       always() &&
       (github.event_name == 'schedule' ||
-       (github.event_name == 'workflow_dispatch' && github.event.inputs.mode != 'asn-only')) &&
-      (needs.discover.result == 'success' || needs.discover.result == 'skipped')
+       (github.event_name == 'workflow_dispatch' &&
+        github.event.inputs.mode != 'asn-only' &&
+        github.event.inputs.mode != 'sni-only')) &&
+      (needs.discover.result    == 'success' || needs.discover.result    == 'skipped') &&
+      (needs.sni_discover.result == 'success' || needs.sni_discover.result == 'skipped')
 
     steps:
       - uses: actions/checkout@v4
@@ -139,7 +206,7 @@ jobs:
         run: pip install aiohttp aiohttp-socks ipaddress
 
       - name: Install masscan
-        continue-on-error: true   # non-fatal: falls back to async scanner
+        continue-on-error: true
         run: sudo apt-get update && sudo apt-get install -y masscan
 
       - name: Run proxy scan (with Armenia-bridge ingestion)
@@ -158,8 +225,6 @@ jobs:
           ARMENIA_V2RAY_DIR:    armenia_v2ray_checker
           ARMENIA_PROXY_DIR:    armenia-proxy-checker
           BALE_TCP_TIMEOUT:     "5"
-          # Skip slow RIPE Stat fetching for EU ASNs - use hardcoded prefixes only.
-          # Set to 1 to re-enable live fetching (adds ~30s, wider coverage).
           EU_FETCH_RIPE:        "0"
           EU_PREFIX_CAP:        "20"
 
@@ -187,24 +252,32 @@ jobs:
           git push
 
 # -----------------------------------------------------------------------------
-# Job 3 - R Verification (new)
+# Job 3 - R Verification
+#
 # Runs immediately after the Python scan completes.
 # Downloads working_iran_proxies.json produced by Job 2, runs test_proxies.R
-# (with full 4-tier Bale/HTTPS tunnel testing), then commits the ranked output
-# files back to the repo so they are always fresh and available for download.
+# with the full 5-tier ladder (Tier 0 SNI-fronting added in v2.2),
+# then commits the ranked output files back to the repo.
+#
+# Tier ladder tested by R:
+#   Tier 0: sni-fronting        domain-fronted via Cloudflare (priority 1200)
+#   Tier 1: IR-exit             2-of-3 geo confirms Iranian exit (priority 1000)
+#   Tier 2: bale-tunnel         HTTPS CONNECT tunnel works (priority 800)
+#   Tier 3: bale-tunnel-blocked tunnel open, Bale blocks exit IP (priority 650)
+#   Tier 4: bale-bridge         HTTP only, no HTTPS tunnel (priority 400)
 #
 # What gets committed:
-#   passing_all_ranked.json      -- all passing proxies, priority-sorted
-#   passing_bale_tunnel.json     -- HTTPS-tunnel-working proxies (browser-ready)
-#   passing_bale_tunnel.txt      -- plain text version for easy use
-#   passing_ir_exit.json         -- confirmed Iranian-exit proxies
-#   passing_bale_tunnel_blocked.json -- tunnel works, Bale blocks IP
-#   passing_bale_bridge.json     -- HTTP-only bridges
+#   passing_sni_fronting.json / .txt     -- Tier 0: domain-fronted proxies
+#   passing_all_ranked.json / .txt       -- all tiers, priority-sorted
+#   passing_bale_tunnel.json / .txt      -- Tier 2: HTTPS tunnel proxies
+#   passing_bale_tunnel_blocked.json     -- Tier 3
+#   passing_ir_exit.json / .txt          -- Tier 1: confirmed Iranian-exit
+#   passing_bale_bridge.json / .txt      -- Tier 4: HTTP-only bridges
 # -----------------------------------------------------------------------------
   verify:
     name: R Verification
     runs-on: ubuntu-latest
-    timeout-minutes: 60   # 702 proxies × 3 probes × 5s ÷ 32 workers ≈ 33 min worst-case
+    timeout-minutes: 60
     permissions:
       contents: write
 
@@ -213,17 +286,24 @@ jobs:
       always() &&
       needs.scan.result == 'success' &&
       (github.event_name == 'schedule' ||
-       (github.event_name == 'workflow_dispatch' && github.event.inputs.mode != 'asn-only'))
+       (github.event_name == 'workflow_dispatch' &&
+        github.event.inputs.mode != 'asn-only' &&
+        github.event.inputs.mode != 'sni-only'))
 
     steps:
       - uses: actions/checkout@v4
         with:
           ref: main
 
-      # Pull the freshly committed working_iran_proxies.json from the scan job
-      - name: Pull latest proxy results
+      - name: Pull latest proxy results (including working_sni_fronting.json)
         run: |
           git pull --rebase origin main
+
+      - name: Check curl SNI flag support
+        run: |
+          curl --version
+          curl --help all | grep -E "tls-servername|resolve" && echo "curl flags OK" \
+            || echo "WARNING: --tls-servername may not be available; SNI-fronting tier will be skipped"
 
       - name: Set up R
         uses: r-lib/actions/setup-r@v2
@@ -234,18 +314,16 @@ jobs:
         run: |
           Rscript -e "install.packages(c('jsonlite', 'parallel'), repos='https://cloud.r-project.org')"
 
-      - name: Run R verification (4-tier Bale/HTTPS tunnel test)
+      - name: Run R verification (5-tier: SNI-fronting + Bale + IR-exit)
         run: |
           Rscript test_proxies.R working_iran_proxies.json \
             --workers 32 \
             --timeout 5
         env:
-          # Force output files into the repo root (current working directory).
-          # Without this, dirname(normalizePath("working_iran_proxies.json"))
-          # resolves to the runner workspace root, which is the same place,
-          # but being explicit avoids surprises if the R script is run from
-          # a subdirectory.
-          R_OUTPUT_DIR: "."
+          R_OUTPUT_DIR:    "."
+          # Path to SNI-fronting pairs produced by sni_discover job.
+          # Falls back to hardcoded defaults if the file is absent.
+          SNI_PAIRS_FILE:  "working_sni_fronting.json"
 
       - name: Upload R verification artifacts
         uses: actions/upload-artifact@v4
@@ -253,6 +331,8 @@ jobs:
           name: r-verified-${{ github.run_id }}
           if-no-files-found: ignore
           path: |
+            passing_sni_fronting.json
+            passing_sni_fronting.txt
             passing_all_ranked.json
             passing_all_ranked.txt
             passing_bale_tunnel.json
@@ -269,11 +349,12 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           for f in \
-            passing_all_ranked.json      passing_all_ranked.txt \
-            passing_bale_tunnel.json     passing_bale_tunnel.txt \
+            passing_sni_fronting.json        passing_sni_fronting.txt \
+            passing_all_ranked.json          passing_all_ranked.txt \
+            passing_bale_tunnel.json         passing_bale_tunnel.txt \
             passing_bale_tunnel_blocked.json passing_bale_tunnel_blocked.txt \
-            passing_ir_exit.json         passing_ir_exit.txt \
-            passing_bale_bridge.json     passing_bale_bridge.txt; do
+            passing_ir_exit.json             passing_ir_exit.txt \
+            passing_bale_bridge.json         passing_bale_bridge.txt; do
             [ -f "$f" ] && git add "$f" || true
           done
           git diff --cached --quiet || git commit -m "chore: R-verified proxy rankings $(date -u +'%Y-%m-%d %H:%M') UTC"
