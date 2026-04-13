@@ -204,7 +204,7 @@ jobs:
   verify:
     name: R Verification
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60   # 702 proxies × 3 probes × 5s ÷ 32 workers ≈ 33 min worst-case
     permissions:
       contents: write
 
@@ -237,8 +237,8 @@ jobs:
       - name: Run R verification (4-tier Bale/HTTPS tunnel test)
         run: |
           Rscript test_proxies.R working_iran_proxies.json \
-            --workers 16 \
-            --timeout 8
+            --workers 32 \
+            --timeout 5
         env:
           # Force output files into the repo root (current working directory).
           # Without this, dirname(normalizePath("working_iran_proxies.json"))
