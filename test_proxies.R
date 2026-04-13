@@ -13,6 +13,11 @@
 #   Tier 2: bale-tunnel         HTTPS CONNECT tunnel to web.bale.ai works
 #   Tier 3: bale-tunnel-blocked tunnel works, Bale blocks exit IP
 #   Tier 4: bale-bridge         HTTP only, no HTTPS tunnel
+#
+# PERFORMANCE NOTE: SNI-fronting (Tier 0) is tested ONLY on proxies that
+# already passed Tier 2 (bale-tunnel). This prevents the ~30s per-proxy
+# overhead of testing 6 SNI pairs on proxies that will never pass.
+# Result: SNI check runs on ~50 proxies instead of ~700.
 # =============================================================================
 
 suppressPackageStartupMessages({
@@ -56,9 +61,7 @@ SPLUS_ENDPOINTS <- c(
 
 # SNI-fronting: default hardcoded pairs (from patterniha sample configs).
 # Overridden at runtime by working_sni_fronting.json if present.
-# Each pair: connect_ip = Cloudflare anycast IP, fake_sni = whitelisted domain.
-# Iranian DPI allows TLS ClientHellos with these SNIs through uninspected;
-# Cloudflare's edge then routes based on the HTTP Host header to the real target.
+# Only tested on proxies that already passed Tier 2 (bale-tunnel).
 SNI_FRONTING_PAIRS_DEFAULT <- list(
   list(connect_ip = "104.16.79.73",  fake_sni = "static.cloudflareinsights.com"),
   list(connect_ip = "188.114.98.0",  fake_sni = "auth.vercel.com"),
@@ -69,8 +72,6 @@ SNI_FRONTING_PAIRS_DEFAULT <- list(
 )
 
 # The real Iranian-infra host routed inside the Cloudflare-fronted tunnel.
-# curl will connect to connect_ip:443 with fake_sni in the TLS ClientHello
-# but send HTTP Host: SNI_REAL_HOST — Cloudflare routes to Iranian infra.
 SNI_REAL_HOST <- "tapi.bale.ai"
 
 # Corporate / intercepting proxy ranges to skip entirely
@@ -119,12 +120,10 @@ is_corporate_ip <- function(ip) {
 }
 
 # -- SNI-fronting pair loader --------------------------------------------------
-# Reads working_sni_fronting.json (produced by scan.py --sni-fronting).
-# Falls back to SNI_FRONTING_PAIRS_DEFAULT if the file is absent or unparseable.
 load_sni_pairs <- function(json_path = Sys.getenv("SNI_PAIRS_FILE",
                                                     "working_sni_fronting.json")) {
   if (!file.exists(json_path)) {
-    cat(sprintf("SNI pairs file not found (%s) — using hardcoded defaults.\n",
+    cat(sprintf("SNI pairs file not found (%s) - using hardcoded defaults.\n",
                 json_path))
     return(SNI_FRONTING_PAIRS_DEFAULT)
   }
@@ -133,7 +132,7 @@ load_sni_pairs <- function(json_path = Sys.getenv("SNI_PAIRS_FILE",
     cat(sprintf("Loaded %d SNI-fronting pairs from %s\n", length(pairs), json_path))
     pairs
   }, error = function(e) {
-    cat(sprintf("Could not parse %s: %s  — using hardcoded defaults.\n",
+    cat(sprintf("Could not parse %s: %s - using hardcoded defaults.\n",
                 json_path, conditionMessage(e)))
     SNI_FRONTING_PAIRS_DEFAULT
   })
@@ -141,38 +140,30 @@ load_sni_pairs <- function(json_path = Sys.getenv("SNI_PAIRS_FILE",
 
 # -- Tier 0: SNI-fronting check ------------------------------------------------
 #
-# Uses curl --tls-servername (fake SNI in TLS ClientHello) combined with
-# --resolve (redirect real_host DNS to connect_ip) to replicate the
-# patterniha domain-fronting technique through the proxy under test.
+# ONLY called on proxies that already passed Tier 2 (bale-tunnel).
+# This avoids paying the full per-pair timeout cost (~30s) on the ~650 proxies
+# that will never pass, keeping total job runtime within the 60-minute budget.
 #
-# How it works:
-#   1. proxy_url forwards the TCP stream to Cloudflare's anycast IP (connect_ip)
-#   2. --tls-servername makes curl put fake_sni in the ClientHello SNI field
-#      -> Iranian DPI sees a whitelisted Cloudflare domain, passes it through
-#   3. Cloudflare terminates TLS; the HTTP Host header contains real_host
-#      -> Cloudflare routes to Iranian infrastructure (tapi.bale.ai etc.)
-#   4. Any non-407, non-timeout HTTP response confirms the path is open
-#
-# Returns a list: ok=TRUE/FALSE, connect_ip, fake_sni, status
+# Uses curl --tls-servername (fake SNI) + --resolve (connect_ip redirect).
+# Short-circuits on first working pair so typical cost is 1 x timeout_secs.
 #
 check_sni_fronting <- function(proxy_url, timeout_secs,
-                                sni_pairs   = SNI_FRONTING_PAIRS_DEFAULT,
-                                real_host   = SNI_REAL_HOST) {
+                                sni_pairs = SNI_FRONTING_PAIRS_DEFAULT,
+                                real_host = SNI_REAL_HOST) {
   curl_bin <- if (.Platform$OS.type == "windows") "curl.exe" else "curl"
   for (pair in sni_pairs) {
     connect_ip  <- pair$connect_ip
     fake_sni    <- pair$fake_sni
-    # --resolve redirects DNS for real_host:443 to connect_ip without changing SNI
     resolve_arg <- sprintf("%s:443:%s", real_host, connect_ip)
     args <- c(
       "-s",
       "-o",  if (.Platform$OS.type == "windows") "NUL" else "/dev/null",
       "-w",  "%{http_code}",
       "-m",  as.character(timeout_secs),
-      "--connect-timeout", "4",
+      "--connect-timeout", "3",
       "-x",  proxy_url,
-      "--tls-servername", fake_sni,    # fake SNI in TLS ClientHello
-      "--resolve",        resolve_arg,  # connect_ip override
+      "--tls-servername", fake_sni,
+      "--resolve",        resolve_arg,
       "-k", "-L",
       sprintf("https://%s/", real_host)
     )
@@ -234,7 +225,7 @@ pretest_score <- function(proxy_str) {
 # -- Post-test priority score --------------------------------------------------
 priority_score <- function(tier, country, geo_score, proto, bale_status, https_status) {
   base <- switch(tier,
-    "sni-fronting"        = 1200L,   # domain-fronted via Cloudflare, DPI-bypassing
+    "sni-fronting"        = 1200L,
     "IR-exit"             = 1000L,
     "bale-tunnel"         = 800L,
     "bale-tunnel-blocked" = 650L,
@@ -257,7 +248,7 @@ priority_score <- function(tier, country, geo_score, proto, bale_status, https_s
   }
 
   if (!is.na(https_status) && https_status > 0L) {
-    if (https_status == 200L)                             base <- base + 50L
+    if (https_status == 200L)                              base <- base + 50L
     else if (https_status >= 301L && https_status < 400L) base <- base + 30L
   }
 
@@ -306,7 +297,7 @@ load_proxies <- function(path) {
   unique(plist[grepl(pat, plist)])
 }
 
-# -- 5a Bale reachability check ------------------------------------------------
+# -- 5a Iranian infra reachability checks --------------------------------------
 
 INTERCEPTOR_DOMAINS <- c(
   "zscaler.net", "zscalerone.net", "zscalertwo.net",
@@ -439,7 +430,18 @@ check_bale_https <- function(proxy_url, timeout_secs) {
 }
 
 # -- 5c Test one proxy ---------------------------------------------------------
-
+#
+# Tier order and performance rationale:
+#
+#   Geo check     -> fast, rules out 90% of candidates immediately
+#   Tier 1        -> IR-exit confirmed, return early
+#   Bale/infra    -> Tier 2-4 candidates identified
+#   HTTPS tunnel  -> Tier 2 vs 4 split
+#   Tier 0 (SNI)  -> ONLY on Tier 2 proxies (bale-tunnel)
+#                    Cost: ~1 SNI pair x timeout_secs for successes,
+#                    ~N pairs x timeout_secs for failures — but N is now
+#                    ~50 not ~700, so total added time is negligible.
+#
 run_checks <- function(purl, timeout_secs, geo_checks) {
   h <- 0L; cc <- "?"
   for (chk in geo_checks) {
@@ -472,6 +474,7 @@ test_proxy <- function(proxy_str, timeout_secs, geo_checks,
   if (length(parts) != 2L)
     return(list(proxy=proxy_str, ok=FALSE, tier="fail", country="parse-err",
                 score=0L, proto="?", bale=FALSE, bale_status=NA_integer_,
+                https_status=NA_integer_, https_url="", final_url="",
                 sni_connect_ip=NA_character_, sni_fake_sni=NA_character_))
 
   host <- parts[1L]
@@ -479,36 +482,13 @@ test_proxy <- function(proxy_str, timeout_secs, geo_checks,
   if (is.na(port))
     return(list(proxy=proxy_str, ok=FALSE, tier="fail", country="bad-port",
                 score=0L, proto="?", bale=FALSE, bale_status=NA_integer_,
+                https_status=NA_integer_, https_url="", final_url="",
                 sni_connect_ip=NA_character_, sni_fake_sni=NA_character_))
 
   proto     <- if (port %in% SOCKS5_PORTS) "socks5" else "http"
   proxy_url <- sprintf("%s://%s:%d", proto, host, port)
 
-  # -- Tier 0: SNI-fronting (domain-fronted via Cloudflare, most DPI-resistant)
-  # Checked first because it represents a strictly harder capability than IR-exit:
-  # the proxy must both have routing to Iranian infra AND support CF domain fronting.
-  sni_res <- check_sni_fronting(proxy_url, timeout_secs, sni_pairs)
-  if (isTRUE(sni_res$ok)) {
-    # Still get geo info for ranking, but don't block on it
-    geo_res <- run_checks(proxy_url, timeout_secs, geo_checks)
-    return(list(
-      proxy          = proxy_str,
-      ok             = TRUE,
-      tier           = "sni-fronting",
-      country        = geo_res$country,
-      score          = geo_res$hits,
-      proto          = proto,
-      bale           = TRUE,
-      bale_status    = sni_res$status,
-      https_status   = sni_res$status,
-      https_url      = sprintf("https://%s/ via %s", SNI_REAL_HOST, sni_res$connect_ip),
-      final_url      = "",
-      sni_connect_ip = sni_res$connect_ip,
-      sni_fake_sni   = sni_res$fake_sni
-    ))
-  }
-
-  # -- Geo check (used by Tier 1 and for ranking of all tiers) ----------------
+  # -- Geo check ---------------------------------------------------------------
   res     <- run_checks(proxy_url, timeout_secs, geo_checks)
   hits    <- res$hits
   country <- res$country
@@ -531,7 +511,7 @@ test_proxy <- function(proxy_str, timeout_secs, geo_checks,
                 https_status=NA_integer_, https_url="",
                 sni_connect_ip=NA_character_, sni_fake_sni=NA_character_))
 
-  # -- Tier 2: Iranian infra probes (Bale -> Rubika -> Splus) ----------------
+  # -- Iranian infra probes (Bale -> Rubika -> Splus) ------------------------
   FAIL_PROBE <- list(reachable=FALSE, status=NA_integer_, endpoint=NA_character_,
                      final_url=NA_character_, intercepted=FALSE)
 
@@ -565,6 +545,7 @@ test_proxy <- function(proxy_str, timeout_secs, geo_checks,
   }
 
   if (iran_probe_score >= 1L) {
+    # HTTPS tunnel check (Tier 2 vs 4 split)
     https_res <- check_bale_https(proxy_url, timeout_secs)
 
     tier <- switch(https_res$tunnel,
@@ -573,6 +554,22 @@ test_proxy <- function(proxy_str, timeout_secs, geo_checks,
       "open-other"   = "bale-tunnel",
       "bale-bridge"
     )
+
+    # -- Tier 0: SNI-fronting --------------------------------------------------
+    # Only tested here, on proxies that confirmed HTTPS tunnel capability.
+    # A bale-tunnel proxy that ALSO passes SNI fronting is promoted to Tier 0.
+    # Cost per proxy: 1 curl call on success, N curl calls on failure.
+    # Total proxies reaching this point: ~50, not ~700. Job stays within budget.
+    sni_connect_ip <- NA_character_
+    sni_fake_sni   <- NA_character_
+    if (tier == "bale-tunnel") {
+      sni_res <- check_sni_fronting(proxy_url, timeout_secs, sni_pairs)
+      if (isTRUE(sni_res$ok)) {
+        tier           <- "sni-fronting"
+        sni_connect_ip <- sni_res$connect_ip
+        sni_fake_sni   <- sni_res$fake_sni
+      }
+    }
 
     return(list(proxy             = proxy_str,
                 ok               = TRUE,
@@ -585,9 +582,9 @@ test_proxy <- function(proxy_str, timeout_secs, geo_checks,
                 iran_probe_score = iran_probe_score,
                 https_status     = https_res$https_status,
                 https_url        = https_res$https_url %||% "",
-                final_url        = bale_res$final_url %||% "",
-                sni_connect_ip   = NA_character_,
-                sni_fake_sni     = NA_character_))
+                final_url        = bale_res$final_url  %||% "",
+                sni_connect_ip   = sni_connect_ip,
+                sni_fake_sni     = sni_fake_sni))
   }
 
   # -- No tier passed --------------------------------------------------------
@@ -663,7 +660,7 @@ check_staleness <- function(path, warn_hours) {
 }
 check_staleness(INPUT_FILE, STALE_WARN_HOURS)
 
-# -- Load SNI-fronting pairs (after staleness check, before workers start) ----
+# -- Load SNI-fronting pairs --------------------------------------------------
 SNI_PAIRS <- load_sni_pairs()
 
 # -- 7 Run --------------------------------------------------------------------
@@ -786,15 +783,12 @@ cat(sprintf(
 
 if (nrow(intercepted) > 0L) {
   cat("\nIntercepted proxies (connection hijacked - do NOT use):\n")
-  for (i in seq_len(nrow(intercepted))) {
+  for (i in seq_len(nrow(intercepted)))
     cat(sprintf("  %-26s  redirected to: %s\n",
                 intercepted$proxy[i], intercepted$final_url[i]))
-  }
 }
 
 out_dir <- tryCatch(dirname(normalizePath(INPUT_FILE)), error=function(e) getwd())
-
-# Override with R_OUTPUT_DIR env var if set (used by GitHub Actions)
 r_out <- Sys.getenv("R_OUTPUT_DIR", "")
 if (nzchar(r_out) && dir.exists(r_out)) out_dir <- r_out
 
@@ -863,18 +857,16 @@ if (nrow(passed) > 0L) {
   write_json(passed, file.path(out_dir, "passing_all_ranked.json"),
              pretty=TRUE, auto_unbox=TRUE)
 
-  top      <- passed$proxy[1]
-  top_tier <- passed$tier[1]
+  top       <- passed$proxy[1]
+  top_tier  <- passed$tier[1]
   top_parts <- strsplit(top, ":")[[1L]]
   cat(sprintf("\n-- Use the top proxy (%s, tier=%s) --\n", top, top_tier))
   if (top_tier == "sni-fronting") {
-    top_sni_ip  <- passed$sni_connect_ip[1]
-    top_sni_fqn <- passed$sni_fake_sni[1]
     cat(sprintf("  config.json: CONNECT_IP=%s  FAKE_SNI=%s  CONNECT_PORT=443\n",
-                top_sni_ip, top_sni_fqn))
+                passed$sni_connect_ip[1], passed$sni_fake_sni[1]))
     cat(sprintf("  curl test: curl -x http://%s --tls-servername %s "
                 "--resolve tapi.bale.ai:443:%s -k https://tapi.bale.ai/ -I\n",
-                top, top_sni_fqn, top_sni_ip))
+                top, passed$sni_fake_sni[1], passed$sni_connect_ip[1]))
   } else {
     cat(sprintf("  Windows proxy settings: %s  port %s\n", top_parts[1], top_parts[2]))
     cat(sprintf("  curl test: curl -x http://%s -k https://web.bale.ai/ -I\n", top))
@@ -905,19 +897,15 @@ for (i in seq_along(country_tbl)) {
   cat(sprintf("  %-6s %4d  (%4.1f%%)  %s\n", cc, count, pct, bar))
 }
 
-# Protocol breakdown
 cat(sprintf("\n Protocol breakdown\n%s\n", strrep("-", 40)))
 proto_tbl <- sort(table(results$proto), decreasing = TRUE)
-for (i in seq_along(proto_tbl)) {
+for (i in seq_along(proto_tbl))
   cat(sprintf("  %-8s %4d\n", names(proto_tbl)[i], proto_tbl[[i]]))
-}
 
-# SNI-fronting pair usage summary
 if (nrow(sni_fronting) > 0L) {
   cat(sprintf("\n SNI-fronting pair usage\n%s\n", strrep("-", 40)))
   sni_tbl <- sort(table(paste0(sni_fronting$sni_connect_ip, " / ",
                                sni_fronting$sni_fake_sni)), decreasing = TRUE)
-  for (i in seq_along(sni_tbl)) {
+  for (i in seq_along(sni_tbl))
     cat(sprintf("  %-55s %4d\n", names(sni_tbl)[i], sni_tbl[[i]]))
-  }
 }
