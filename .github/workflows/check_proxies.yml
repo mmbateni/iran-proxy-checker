@@ -161,7 +161,7 @@ jobs:
        (github.event_name == 'workflow_dispatch' &&
         github.event.inputs.mode != 'asn-only' &&
         github.event.inputs.mode != 'sni-only')) &&
-      (needs.discover.result    == 'success' || needs.discover.result    == 'skipped') &&
+      (needs.discover.result     == 'success' || needs.discover.result     == 'skipped') &&
       (needs.sni_discover.result == 'success' || needs.sni_discover.result == 'skipped')
 
     steps:
@@ -295,15 +295,14 @@ jobs:
         with:
           ref: main
 
-      - name: Pull latest proxy results (including working_sni_fronting.json)
-        run: |
-          git pull --rebase origin main
+      - name: Pull latest proxy results
+        run: git pull --rebase origin main
 
       - name: Check curl SNI flag support
         run: |
           curl --version
           curl --help all | grep -E "tls-servername|resolve" && echo "curl flags OK" \
-            || echo "WARNING: --tls-servername may not be available; SNI-fronting tier will be skipped"
+            || echo "WARNING: --tls-servername unavailable; SNI-fronting tier skipped"
 
       - name: Set up R
         uses: r-lib/actions/setup-r@v2
@@ -314,16 +313,14 @@ jobs:
         run: |
           Rscript -e "install.packages(c('jsonlite', 'parallel'), repos='https://cloud.r-project.org')"
 
-      - name: Run R verification (5-tier: SNI-fronting + Bale + IR-exit)
+      - name: Run R verification
         run: |
           Rscript test_proxies.R working_iran_proxies.json \
             --workers 32 \
             --timeout 5
         env:
-          R_OUTPUT_DIR:    "."
-          # Path to SNI-fronting pairs produced by sni_discover job.
-          # Falls back to hardcoded defaults if the file is absent.
-          SNI_PAIRS_FILE:  "working_sni_fronting.json"
+          R_OUTPUT_DIR:   "."
+          SNI_PAIRS_FILE: "working_sni_fronting.json"
 
       - name: Upload R verification artifacts
         uses: actions/upload-artifact@v4
