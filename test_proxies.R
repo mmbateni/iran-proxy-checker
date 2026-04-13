@@ -17,7 +17,7 @@ suppressPackageStartupMessages({
 
 # -- 1 Edit these when running interactively in RStudio ------------------------
 INPUT_FILE <- "D:/IR_proxy_testing/working_iran_proxies.json"
-WORKERS    <- 20L    # socket-cluster workers on Windows (tune to your CPU cores)
+WORKERS    <- 32L    # socket-cluster workers on Windows (tune to your CPU cores)
 TIMEOUT    <- 5L     # hard wall-clock seconds per geo-check
 
 # NOTE: Close PingPlotter (and any VPN) before running.
@@ -506,10 +506,21 @@ test_proxy <- function(proxy_str, timeout_secs, geo_checks) {
                 bale=FALSE, bale_status=NA_integer_,
                 https_status=NA_integer_, https_url=""))
   
-  # -- Tier 2: Iranian infra probes (Bale + Rubika + Splus, 1-of-3 vote) --------
+  # -- Tier 2: Iranian infra probes (Bale -> Rubika -> Splus, short-circuit) ----
+  # Run in priority order; stop as soon as one probe passes. This avoids paying
+  # 3x the curl timeout per proxy on the common "Bale passes" case.
+  # All-fail case still costs 3x, but that is unavoidable for genuine non-bridges.
+  FAIL_PROBE <- list(reachable=FALSE, status=NA_integer_, endpoint=NA_character_,
+                     final_url=NA_character_, intercepted=FALSE)
+
   bale_res   <- check_bale(proxy_url, timeout_secs, BALE_ENDPOINTS)
-  rubika_res <- check_iranian_infra(proxy_url, timeout_secs, RUBIKA_ENDPOINTS)
-  splus_res  <- check_iranian_infra(proxy_url, timeout_secs, SPLUS_ENDPOINTS)
+  rubika_res <- if (!isTRUE(bale_res$reachable) && !isTRUE(bale_res$intercepted))
+                  check_iranian_infra(proxy_url, timeout_secs, RUBIKA_ENDPOINTS)
+                else FAIL_PROBE
+  splus_res  <- if (!isTRUE(bale_res$reachable)  && !isTRUE(bale_res$intercepted) &&
+                    !isTRUE(rubika_res$reachable) && !isTRUE(rubika_res$intercepted))
+                  check_iranian_infra(proxy_url, timeout_secs, SPLUS_ENDPOINTS)
+                else FAIL_PROBE
 
   iran_probe_score <- sum(c(isTRUE(bale_res$reachable),
                             isTRUE(rubika_res$reachable),
