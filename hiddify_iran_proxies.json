@@ -2,7 +2,7 @@
   "outbounds": [
     {
       "type": "http",
-      "server": "64.227.106.157",
+      "server": "46.29.162.166",
       "server_port": 80,
       "tag": "proxy-0",
       "comment": "EU->IR",
@@ -10,71 +10,71 @@
     },
     {
       "type": "http",
-      "server": "52.229.30.3",
-      "server_port": 80,
+      "server": "168.119.12.205",
+      "server_port": 443,
       "tag": "proxy-1",
       "comment": "EU->IR",
       "iran_probe_score": 3
     },
     {
       "type": "http",
-      "server": "103.69.151.189",
-      "server_port": 8080,
+      "server": "209.46.30.70",
+      "server_port": 80,
       "tag": "proxy-2",
       "comment": "EU->IR",
       "iran_probe_score": 3
     },
     {
       "type": "http",
-      "server": "65.21.115.45",
-      "server_port": 443,
+      "server": "158.160.215.167",
+      "server_port": 8127,
       "tag": "proxy-3",
       "comment": "EU->IR",
       "iran_probe_score": 3
     },
     {
       "type": "http",
-      "server": "158.160.215.167",
-      "server_port": 8124,
+      "server": "123.182.58.137",
+      "server_port": 8089,
       "tag": "proxy-4",
       "comment": "EU->IR",
       "iran_probe_score": 3
     },
     {
       "type": "http",
-      "server": "202.53.171.114",
-      "server_port": 80,
+      "server": "159.69.12.205",
+      "server_port": 443,
       "tag": "proxy-5",
       "comment": "EU->IR",
       "iran_probe_score": 3
     },
     {
       "type": "http",
-      "server": "160.153.0.142",
-      "server_port": 80,
+      "server": "170.106.187.7",
+      "server_port": 19653,
       "tag": "proxy-6",
       "comment": "EU->IR",
       "iran_probe_score": 3
     },
     {
       "type": "http",
-      "server": "185.170.166.145",
-      "server_port": 80,
+      "server": "144.91.115.49",
+      "server_port": 443,
       "tag": "proxy-7",
       "comment": "EU->IR",
       "iran_probe_score": 3
     },
     {
       "type": "http",
-      "server": "172.200.72.48",
-      "server_port": 80,
+      "server": "185.76.240.61",
+      "server_port": 10001,
       "tag": "proxy-8",
       "comment": "EU->IR",
       "iran_probe_score": 3
     },
     {
       "type": "http",
-      "server": "128.140.95.251",
+      "server": "157.90.243.37",
       "server_port": 80,
       "tag": "proxy-9",
       "comment": "EU->IR",
