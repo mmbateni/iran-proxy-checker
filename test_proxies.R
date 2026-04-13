@@ -6,6 +6,13 @@
 #       Rscript test_proxies.R working_iran_proxies.txt --workers 20 --timeout 5
 #
 # install.packages(c("jsonlite", "parallel"))   # one-time
+#
+# Tier ladder (highest to lowest priority):
+#   Tier 0: sni-fronting        domain-fronted via Cloudflare, DPI-resistant
+#   Tier 1: IR-exit             2-of-3 geo sources confirm Iranian exit
+#   Tier 2: bale-tunnel         HTTPS CONNECT tunnel to web.bale.ai works
+#   Tier 3: bale-tunnel-blocked tunnel works, Bale blocks exit IP
+#   Tier 4: bale-bridge         HTTP only, no HTTPS tunnel
 # =============================================================================
 
 suppressPackageStartupMessages({
@@ -17,83 +24,76 @@ suppressPackageStartupMessages({
 
 # -- 1 Edit these when running interactively in RStudio ------------------------
 INPUT_FILE <- "D:/IR_proxy_testing/working_iran_proxies.json"
-WORKERS    <- 32L    # socket-cluster workers on Windows (tune to your CPU cores)
-TIMEOUT    <- 5L     # hard wall-clock seconds per geo-check
-
-# NOTE: Close PingPlotter (and any VPN) before running.
-# PingPlotter opens background sockets that the R socket cluster inherits,
-# causing "closing unused connection" warnings and corrupting worker results.
+WORKERS    <- 32L
+TIMEOUT    <- 5L
 
 # Ports that speak SOCKS5 rather than HTTP CONNECT.
-# Any proxy on one of these ports is tested with socks5:// instead of http://.
-# Extend this list if you find other SOCKS ports in your proxy files.
 SOCKS5_PORTS <- c(1080L, 1081L, 4145L, 5678L, 9050L, 9150L, 10800L)
 
 # Warn if the proxy file is older than this many hours.
-# Public proxies go dead within 1-6h; anything older than this is likely stale.
 STALE_WARN_HOURS <- 3L
 
-# Bale reachability endpoints - mirrors BALE_TEST_ENDPOINTS in scan.py.
-# Any HTTP response (including 4xx/5xx) confirms the proxy can route to
-# Iranian-hosted infrastructure. A timeout or connection error means it can't.
-# This is Tier 2 verification, identical to what scan.py does on the runner.
+# Bale reachability endpoints
 BALE_ENDPOINTS <- c(
-  "https://tapi.bale.ai/",   # Bot API - most stable
-  "https://bale.ai/",        # Main site
-  "http://bale.ai/"          # HTTP fallback
+  "https://tapi.bale.ai/",
+  "https://bale.ai/",
+  "http://bale.ai/"
 )
 
-# Rubika (rubika.ir) — Iranian social/messaging platform.
-# Same EU-reachable / NA-blocked asymmetry as Bale. Independent CDN path.
+# Rubika endpoints
 RUBIKA_ENDPOINTS <- c(
   "https://web.rubika.ir/",
   "https://rubika.ir/",
   "http://rubika.ir/"
 )
 
-# Splus (splus.ir) — Iranian media streaming platform.
-# Third independent probe; different CDN path from Bale and Rubika.
+# Splus endpoints
 SPLUS_ENDPOINTS <- c(
   "https://web.splus.ir/",
   "https://splus.ir/",
   "http://splus.ir/"
 )
 
-# -- Corporate / intercepting proxy ranges -------------------------------------
-# These IPs route traffic but inject a corporate login wall (Zscaler, Netskope,
-# Palo Alto Prisma, etc.) before forwarding - useless for Iranian network access.
-# Proxies in these ranges are skipped entirely before testing.
-# Root cause of the Zscaler screenshot: 165.225.113.220 is Zscaler.
+# SNI-fronting: default hardcoded pairs (from patterniha sample configs).
+# Overridden at runtime by working_sni_fronting.json if present.
+# Each pair: connect_ip = Cloudflare anycast IP, fake_sni = whitelisted domain.
+# Iranian DPI allows TLS ClientHellos with these SNIs through uninspected;
+# Cloudflare's edge then routes based on the HTTP Host header to the real target.
+SNI_FRONTING_PAIRS_DEFAULT <- list(
+  list(connect_ip = "104.16.79.73",  fake_sni = "static.cloudflareinsights.com"),
+  list(connect_ip = "188.114.98.0",  fake_sni = "auth.vercel.com"),
+  list(connect_ip = "104.21.0.0",    fake_sni = "cdnjs.cloudflare.com"),
+  list(connect_ip = "172.64.0.0",    fake_sni = "challenges.cloudflare.com"),
+  list(connect_ip = "104.16.0.1",    fake_sni = "speed.cloudflare.com"),
+  list(connect_ip = "104.24.0.1",    fake_sni = "developers.cloudflare.com")
+)
+
+# The real Iranian-infra host routed inside the Cloudflare-fronted tunnel.
+# curl will connect to connect_ip:443 with fake_sni in the TLS ClientHello
+# but send HTTP Host: SNI_REAL_HOST — Cloudflare routes to Iranian infra.
+SNI_REAL_HOST <- "tapi.bale.ai"
+
+# Corporate / intercepting proxy ranges to skip entirely
 CORPORATE_RANGES <- list(
-  # Zscaler - c() would coerce 16L to "16", so use list() to preserve integer type
   list("165.225.0.0",   16L),
   list("136.226.0.0",   16L),
   list("147.161.0.0",   16L),
   list("185.46.212.0",  22L),
   list("104.129.192.0", 20L),
   list("170.85.0.0",    16L),
-  # Netskope
   list("163.116.128.0", 17L),
   list("163.116.0.0",   17L),
-  # Palo Alto Prisma / GlobalProtect
   list("199.167.52.0",  22L)
 )
 
-# -- Country proximity tiers for pre-test ordering ----------------------------
-# Proxies whose exit IP is in a country geographically / politically closer to
-# Iran are more likely to have routing paths into the Iranian network.
-# Used only to ORDER the input list (better candidates tested first).
-IRAN_NEIGHBOR_CC  <- c("AM", "AZ", "TR", "IQ", "AF", "TM", "PK")  # direct neighbors
-IRAN_REGIONAL_CC  <- c("RU", "DE", "NL", "FI", "SE", "AT", "CH",  # EU hosting used
-                        "FR", "GB", "PL", "UA", "GE", "KZ")        #   by Iranian ops
+# Country proximity tiers
+IRAN_NEIGHBOR_CC  <- c("AM", "AZ", "TR", "IQ", "AF", "TM", "PK")
+IRAN_REGIONAL_CC  <- c("RU", "DE", "NL", "FI", "SE", "AT", "CH",
+                        "FR", "GB", "PL", "UA", "GE", "KZ")
 
 # -- IP range helpers ----------------------------------------------------------
-# Pure base-R: no packages needed, safe to run in cluster workers.
 
 ip_to_int <- function(ip) {
-  # Returns the numeric (double) value of an IPv4 address.
-  # Uses numeric, NOT integer - R integers are 32-bit signed and overflow
-  # for IPs >= 128.0.0.0 (~2.1B limit). Doubles hold all 32-bit values exactly.
   parts <- suppressWarnings(as.numeric(strsplit(ip, "\\.")[[1L]]))
   if (length(parts) != 4L || any(is.na(parts)) ||
       any(parts < 0) || any(parts > 255)) return(NA_real_)
@@ -101,18 +101,13 @@ ip_to_int <- function(ip) {
 }
 
 is_in_cidr <- function(ip, network, prefix_len) {
-  # Pure numeric CIDR check - avoids R integer overflow entirely.
-  # All arithmetic stays in double; no bitwise ops needed.
   prefix_len <- as.numeric(prefix_len)
   if (is.na(prefix_len) || prefix_len < 0 || prefix_len > 32) return(FALSE)
   ip_i  <- ip_to_int(ip)
   net_i <- ip_to_int(network)
   if (is.na(ip_i) || is.na(net_i)) return(FALSE)
-  # Number of host bits
   host_bits <- 32 - prefix_len
-  # Divisor equivalent to 2^host_bits
   divisor <- 2 ^ host_bits
-  # Two IPs are in the same subnet iff floor(ip/divisor) == floor(net/divisor)
   floor(ip_i / divisor) == floor(net_i / divisor)
 }
 
@@ -123,10 +118,83 @@ is_corporate_ip <- function(ip) {
   FALSE
 }
 
+# -- SNI-fronting pair loader --------------------------------------------------
+# Reads working_sni_fronting.json (produced by scan.py --sni-fronting).
+# Falls back to SNI_FRONTING_PAIRS_DEFAULT if the file is absent or unparseable.
+load_sni_pairs <- function(json_path = Sys.getenv("SNI_PAIRS_FILE",
+                                                    "working_sni_fronting.json")) {
+  if (!file.exists(json_path)) {
+    cat(sprintf("SNI pairs file not found (%s) — using hardcoded defaults.\n",
+                json_path))
+    return(SNI_FRONTING_PAIRS_DEFAULT)
+  }
+  tryCatch({
+    pairs <- fromJSON(json_path, simplifyVector = FALSE)
+    cat(sprintf("Loaded %d SNI-fronting pairs from %s\n", length(pairs), json_path))
+    pairs
+  }, error = function(e) {
+    cat(sprintf("Could not parse %s: %s  — using hardcoded defaults.\n",
+                json_path, conditionMessage(e)))
+    SNI_FRONTING_PAIRS_DEFAULT
+  })
+}
+
+# -- Tier 0: SNI-fronting check ------------------------------------------------
+#
+# Uses curl --tls-servername (fake SNI in TLS ClientHello) combined with
+# --resolve (redirect real_host DNS to connect_ip) to replicate the
+# patterniha domain-fronting technique through the proxy under test.
+#
+# How it works:
+#   1. proxy_url forwards the TCP stream to Cloudflare's anycast IP (connect_ip)
+#   2. --tls-servername makes curl put fake_sni in the ClientHello SNI field
+#      -> Iranian DPI sees a whitelisted Cloudflare domain, passes it through
+#   3. Cloudflare terminates TLS; the HTTP Host header contains real_host
+#      -> Cloudflare routes to Iranian infrastructure (tapi.bale.ai etc.)
+#   4. Any non-407, non-timeout HTTP response confirms the path is open
+#
+# Returns a list: ok=TRUE/FALSE, connect_ip, fake_sni, status
+#
+check_sni_fronting <- function(proxy_url, timeout_secs,
+                                sni_pairs   = SNI_FRONTING_PAIRS_DEFAULT,
+                                real_host   = SNI_REAL_HOST) {
+  curl_bin <- if (.Platform$OS.type == "windows") "curl.exe" else "curl"
+  for (pair in sni_pairs) {
+    connect_ip  <- pair$connect_ip
+    fake_sni    <- pair$fake_sni
+    # --resolve redirects DNS for real_host:443 to connect_ip without changing SNI
+    resolve_arg <- sprintf("%s:443:%s", real_host, connect_ip)
+    args <- c(
+      "-s",
+      "-o",  if (.Platform$OS.type == "windows") "NUL" else "/dev/null",
+      "-w",  "%{http_code}",
+      "-m",  as.character(timeout_secs),
+      "--connect-timeout", "4",
+      "-x",  proxy_url,
+      "--tls-servername", fake_sni,    # fake SNI in TLS ClientHello
+      "--resolve",        resolve_arg,  # connect_ip override
+      "-k", "-L",
+      sprintf("https://%s/", real_host)
+    )
+    raw    <- try(suppressWarnings(
+                system2(curl_bin, args, stdout = TRUE, stderr = FALSE)
+              ), silent = TRUE)
+    status <- suppressWarnings(as.integer(trimws(paste(raw, collapse = ""))))
+    if (!is.na(status) && status > 0L && status != 407L && status < 600L)
+      return(list(
+        ok         = TRUE,
+        connect_ip = connect_ip,
+        fake_sni   = fake_sni,
+        status     = status
+      ))
+  }
+  list(ok         = FALSE,
+       connect_ip = NA_character_,
+       fake_sni   = NA_character_,
+       status     = NA_integer_)
+}
+
 # -- Pre-test priority heuristic -----------------------------------------------
-# Assigns a rough score to each proxy string BEFORE testing, used only to
-# order the input list so the most promising candidates are tested first.
-# Score is based on port pattern and IP octet hints only (no live checks).
 pretest_score <- function(proxy_str) {
   parts <- strsplit(proxy_str, ":")[[1L]]
   if (length(parts) != 2L) return(0L)
@@ -136,7 +204,6 @@ pretest_score <- function(proxy_str) {
 
   score <- 0L
 
-  # Iranian IP space heuristics (first two octets of well-known IR ranges)
   first2 <- paste(strsplit(ip, "\\.")[[1L]][1:2], collapse=".")
   ir_hints <- c("5.160","5.200","5.201","5.202","5.238","31.2","31.14","31.24",
                 "31.40","31.58","31.59","37.98","37.152","37.156","37.202",
@@ -159,47 +226,36 @@ pretest_score <- function(proxy_str) {
                 "194.225","195.146","195.147","195.148","196.245",
                 "217.144","217.145","217.146","217.147","217.172","217.173")
   if (first2 %in% ir_hints) score <- score + 50L
-
-  # SOCKS protocol is harder to intercept / fingerprint than HTTP
   if (port %in% c(1080L, 1081L, 4145L, 5678L, 9050L, 9150L)) score <- score + 10L
-
-  # Standard proxy ports are less likely to be honeypots / CDN false positives
   if (port %in% c(80L, 443L, 3128L, 8080L, 8118L, 8888L)) score <- score + 5L
-
   score
 }
 
 # -- Post-test priority score --------------------------------------------------
-# Ranks tested results from most to least useful for Iranian network access.
-# Higher score = closer to the goal = appears first in output files.
 priority_score <- function(tier, country, geo_score, proto, bale_status, https_status) {
   base <- switch(tier,
+    "sni-fronting"        = 1200L,   # domain-fronted via Cloudflare, DPI-bypassing
     "IR-exit"             = 1000L,
-    "bale-tunnel"         = 800L,   # HTTPS CONNECT works + Bale responds
-    "bale-tunnel-blocked" = 650L,   # HTTPS tunnel open but Bale blocks exit IP
-    "bale-bridge"         = 400L,   # HTTP only, no HTTPS tunnel
+    "bale-tunnel"         = 800L,
+    "bale-tunnel-blocked" = 650L,
+    "bale-bridge"         = 400L,
     "fail"                = 0L,
     0L
   )
 
-  # Geo confidence (only matters for IR-exit)
   base <- base + (geo_score %||% 0L) * 20L
 
-  # SOCKS > HTTP (harder to intercept, works with more apps)
   if (!is.na(proto) && proto %in% c("socks5", "socks4")) base <- base + 30L
 
-  # Neighbor country exit is more likely to have peering into Iran
   if (!is.na(country) && country %in% IRAN_NEIGHBOR_CC)  base <- base + 40L
   if (!is.na(country) && country %in% IRAN_REGIONAL_CC)  base <- base + 15L
   if (!is.na(country) && country == "IR")                 base <- base + 100L
 
-  # Plain Bale HTTP quality (for bale-bridge tier only)
   if (!is.na(bale_status)) {
     if (bale_status == 200L)                              base <- base + 20L
     else if (bale_status >= 300L && bale_status < 400L)  base <- base + 10L
   }
 
-  # HTTPS tunnel quality boost (200 = full browser access, worth extra)
   if (!is.na(https_status) && https_status > 0L) {
     if (https_status == 200L)                             base <- base + 50L
     else if (https_status >= 301L && https_status < 400L) base <- base + 30L
@@ -208,7 +264,7 @@ priority_score <- function(tier, country, geo_score, proto, bale_status, https_s
   base
 }
 
-# -- 2 CLI overrides (Rscript mode) --------------------------------------------
+# -- 2 CLI overrides -----------------------------------------------------------
 local({
   a <- commandArgs(trailingOnly = TRUE)
   if (length(a) == 0) return()
@@ -219,18 +275,18 @@ local({
   }
 })
 
-# -- 3 Geo-check targets (same 3 as scan.py) -----------------------------------
+# -- 3 Geo-check targets -------------------------------------------------------
 GEO_CHECKS <- list(
   list(url = "http://ip-api.com/json/?fields=status,countryCode", key = "countryCode"),
   list(url = "http://ipwho.is/",                                   key = "country_code"),
   list(url = "http://ipapi.co/json/",                              key = "country_code")
 )
 
-# -- 4 Load proxies from .txt or scan.py .json ---------------------------------
+# -- 4 Load proxies ------------------------------------------------------------
 load_proxies <- function(path) {
   if (!file.exists(path)) stop("File not found: ", path)
   pat <- "^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}:\\d{2,5}$"
-  
+
   if (grepl("\\.json$", path, ignore.case = TRUE)) {
     dat   <- fromJSON(path, simplifyVector = FALSE)
     items <- if (is.null(names(dat))) dat else unname(dat)
@@ -251,69 +307,38 @@ load_proxies <- function(path) {
 }
 
 # -- 5a Bale reachability check ------------------------------------------------
-#
-# Three-layer verification - ALL three must pass for a proxy to be accepted
-# as a Bale bridge:
-#
-#   Layer 1 - HTTP status:  any code 1-599 except 407 (proxy auth required)
-#   Layer 2 - Final URL:    after following all redirects, the effective URL
-#                           must still be on bale.ai / tapi.bale.ai.
-#                           If it landed on zscaler.net, bluecoat.com, etc.,
-#                           the proxy hijacked the connection.
-#   Layer 3 - 407 guard:    407 means the proxy itself blocked the request
-#                           before it reached Bale - NOT a bridge signal.
-#
-# curl's -w "%{http_code} %{url_effective}" writes both fields separated by
-# a space after the response body (which is discarded with -o NUL/-o /dev/null).
-# We parse them as two tokens from the last line of stdout.
-#
-# Known interceptor domains (extend as needed):
+
 INTERCEPTOR_DOMAINS <- c(
-  # Zscaler family
   "zscaler.net", "zscalerone.net", "zscalertwo.net",
   "zscalerthree.net", "zscalerbeta.net", "zscalergov.net",
   "zscloud.net", "zscalerprivateaccess.net",
-  # Symantec / Broadcom Blue Coat
   "bluecoat.com", "symantec.com", "broadcom.com",
-  # Forcepoint / Websense
   "forcepoint.com", "websense.com",
-  # Cisco Umbrella / Ironport
   "umbrella.com", "opendns.com", "cisco.com",
-  # Palo Alto Prisma
   "prismaaccess.com", "gpcloudservice.com",
-  # Netskope
   "netskope.com", "netskopeusercontent.com",
-  # McAfee / Trellix Web Gateway
   "mcafee.com", "trellix.com", "skyhighsecurity.com",
-  # Barracuda
   "barracudanetworks.com", "cudaops.com",
-  # iboss
   "iboss.com",
-  # Menlo Security
   "menlosecurity.com",
-  # Cloudflare Gateway (not a bridge - Cloudflare's own filtering)
   "cloudflaregateway.com", "cloudflareclient.com",
-  # Generic captive portal / auth wall indicators
   "captive-portal", "safe-browsing", "gateway.security"
 )
 
 is_interceptor_url <- function(url) {
   if (is.na(url) || !nzchar(url)) return(FALSE)
-  # Extract hostname: remove scheme, path, query
   host <- tryCatch({
     h <- sub("^https?://", "", url)
     h <- sub("/.*$", "", h)
-    h <- sub(":.*$", "", h)    # strip port if present
+    h <- sub(":.*$", "", h)
     tolower(h)
   }, error = function(e) "")
   if (!nzchar(host)) return(FALSE)
-  # Check if host ends with any known interceptor domain
   any(vapply(INTERCEPTOR_DOMAINS, function(d)
     host == d || endsWith(host, paste0(".", d)),
     logical(1L)))
 }
 
-# Generic Iranian-infra probe helper used by check_bale + new probes.
 check_iranian_infra <- function(proxy_url, timeout_secs, endpoints) {
   curl_bin <- if (.Platform$OS.type == "windows") "curl.exe" else "curl"
   for (ep in endpoints) {
@@ -348,31 +373,14 @@ check_iranian_infra <- function(proxy_url, timeout_secs, endpoints) {
 }
 
 check_bale <- function(proxy_url, timeout_secs, bale_endpoints) {
-  # Thin wrapper — preserves original call signature.
   check_iranian_infra(proxy_url, timeout_secs, bale_endpoints)
 }
 
-# HTTPS CONNECT tunnel target - the actual Bale web client URL browsers need
 BALE_HTTPS_TARGET <- "https://web.bale.ai/"
 
 # -- 5b HTTPS CONNECT tunnel check --------------------------------------------
-#
-# This is what the browser actually does: sends HTTP CONNECT web.bale.ai:443
-# to the proxy, then opens TLS inside the tunnel.
-# ERR_TUNNEL_CONNECTION_FAILED in the browser = this check returns FALSE.
-#
-# Result tiers based on HTTPS status code:
-#   200 / 3xx  -> "bale-tunnel"         (full browser access to web.bale.ai)
-#   401 / 403  -> "bale-tunnel-blocked" (tunnel works but Bale blocks exit IP)
-#   0 / timeout-> no HTTPS CONNECT support (stay as plain bale-bridge)
-#   407        -> proxy auth required (useless)
-#
+
 check_bale_https <- function(proxy_url, timeout_secs) {
-  # --proxytunnel forces HTTP CONNECT tunnel instead of plain HTTP forwarding.
-  # Without it, curl sends GET http://web.bale.ai/ which hits the echo/debug
-  # page and returns 200 — a false positive.
-  # -o tmp_body writes the body to a file so stdout contains ONLY the -w output,
-  # avoiding any embedded newline in the -w argument that would split the string.
   curl_bin <- if (.Platform$OS.type == "windows") "curl.exe" else "curl"
   tmp_body <- tempfile(fileext = ".txt")
   on.exit(unlink(tmp_body), add = TRUE)
@@ -408,8 +416,6 @@ check_bale_https <- function(proxy_url, timeout_secs) {
   if (status == 407L)
     return(list(tunnel = "auth-required", https_status = 407L, https_url = ""))
 
-  # Body check: Bale echo page (plain HTTP) contains "REMOTE_ADDR = ".
-  # Real HTTPS tunnel responses never contain this string.
   body_text <- tryCatch(
     paste(readLines(tmp_body, warn = FALSE), collapse = " "),
     error = function(e) ""
@@ -417,7 +423,6 @@ check_bale_https <- function(proxy_url, timeout_secs) {
   if (grepl("REMOTE_ADDR", body_text, fixed = TRUE))
     return(list(tunnel = "echo-page", https_status = 0L, https_url = ""))
 
-  # URL destination check: final URL must remain on bale.ai
   if (nzchar(final_url) && !grepl("bale[.]ai", final_url, ignore.case = TRUE)) {
     if (is_interceptor_url(final_url))
       return(list(tunnel = "intercepted", https_status = status, https_url = final_url))
@@ -433,16 +438,8 @@ check_bale_https <- function(proxy_url, timeout_secs) {
   list(tunnel = "open-other", https_status = status, https_url = final_url)
 }
 
-# -- 5c Test one proxy using system curl (hard OS-level timeout) ---------------
-#
-# Protocol selection:
-#   Ports in SOCKS5_PORTS ??? socks5://   (SOCKS proxies drop HTTP CONNECT silently)
-#   All other ports       ??? http://
-# curl -x accepts both protocols natively.
-#
+# -- 5c Test one proxy ---------------------------------------------------------
 
-# run_checks is a top-level function so it can be exported to cluster workers.
-# Runs all 3 geo-check URLs through a given proxy URL and returns hit count + country.
 run_checks <- function(purl, timeout_secs, geo_checks) {
   h <- 0L; cc <- "?"
   for (chk in geo_checks) {
@@ -469,27 +466,54 @@ run_checks <- function(purl, timeout_secs, geo_checks) {
   list(hits=h, country=cc)
 }
 
-test_proxy <- function(proxy_str, timeout_secs, geo_checks) {
+test_proxy <- function(proxy_str, timeout_secs, geo_checks,
+                        sni_pairs = SNI_FRONTING_PAIRS_DEFAULT) {
   parts <- strsplit(proxy_str, ":")[[1L]]
   if (length(parts) != 2L)
     return(list(proxy=proxy_str, ok=FALSE, tier="fail", country="parse-err",
-                score=0L, proto="?", bale=FALSE, bale_status=NA_integer_))
-  
+                score=0L, proto="?", bale=FALSE, bale_status=NA_integer_,
+                sni_connect_ip=NA_character_, sni_fake_sni=NA_character_))
+
   host <- parts[1L]
   port <- suppressWarnings(as.integer(parts[2L]))
   if (is.na(port))
     return(list(proxy=proxy_str, ok=FALSE, tier="fail", country="bad-port",
-                score=0L, proto="?", bale=FALSE, bale_status=NA_integer_))
-  
-  # Choose protocol based on port - fixes the 0/3 problem for SOCKS ports
+                score=0L, proto="?", bale=FALSE, bale_status=NA_integer_,
+                sni_connect_ip=NA_character_, sni_fake_sni=NA_character_))
+
   proto     <- if (port %in% SOCKS5_PORTS) "socks5" else "http"
   proxy_url <- sprintf("%s://%s:%d", proto, host, port)
-  
+
+  # -- Tier 0: SNI-fronting (domain-fronted via Cloudflare, most DPI-resistant)
+  # Checked first because it represents a strictly harder capability than IR-exit:
+  # the proxy must both have routing to Iranian infra AND support CF domain fronting.
+  sni_res <- check_sni_fronting(proxy_url, timeout_secs, sni_pairs)
+  if (isTRUE(sni_res$ok)) {
+    # Still get geo info for ranking, but don't block on it
+    geo_res <- run_checks(proxy_url, timeout_secs, geo_checks)
+    return(list(
+      proxy          = proxy_str,
+      ok             = TRUE,
+      tier           = "sni-fronting",
+      country        = geo_res$country,
+      score          = geo_res$hits,
+      proto          = proto,
+      bale           = TRUE,
+      bale_status    = sni_res$status,
+      https_status   = sni_res$status,
+      https_url      = sprintf("https://%s/ via %s", SNI_REAL_HOST, sni_res$connect_ip),
+      final_url      = "",
+      sni_connect_ip = sni_res$connect_ip,
+      sni_fake_sni   = sni_res$fake_sni
+    ))
+  }
+
+  # -- Geo check (used by Tier 1 and for ranking of all tiers) ----------------
   res     <- run_checks(proxy_url, timeout_secs, geo_checks)
   hits    <- res$hits
   country <- res$country
-  
-  # SOCKS4 fallback - try socks4:// when socks5:// returned nothing useful.
+
+  # SOCKS4 fallback
   if (hits == 0L && proto == "socks5") {
     res4 <- run_checks(sprintf("socks4://%s:%d", host, port), timeout_secs, geo_checks)
     if (res4$hits > hits) {
@@ -498,18 +522,16 @@ test_proxy <- function(proxy_str, timeout_secs, geo_checks) {
       proto   <- "socks4"
     }
   }
-  
-  # -- Tier 1: 2-of-3 geo sources confirm IR exit -------------------------------
+
+  # -- Tier 1: 2-of-3 geo sources confirm IR exit ----------------------------
   if (hits >= 2L)
     return(list(proxy=proxy_str, ok=TRUE, tier="IR-exit",
                 country=country, score=hits, proto=proto,
                 bale=FALSE, bale_status=NA_integer_,
-                https_status=NA_integer_, https_url=""))
-  
-  # -- Tier 2: Iranian infra probes (Bale -> Rubika -> Splus, short-circuit) ----
-  # Run in priority order; stop as soon as one probe passes. This avoids paying
-  # 3x the curl timeout per proxy on the common "Bale passes" case.
-  # All-fail case still costs 3x, but that is unavoidable for genuine non-bridges.
+                https_status=NA_integer_, https_url="",
+                sni_connect_ip=NA_character_, sni_fake_sni=NA_character_))
+
+  # -- Tier 2: Iranian infra probes (Bale -> Rubika -> Splus) ----------------
   FAIL_PROBE <- list(reachable=FALSE, status=NA_integer_, endpoint=NA_character_,
                      final_url=NA_character_, intercepted=FALSE)
 
@@ -526,7 +548,6 @@ test_proxy <- function(proxy_str, timeout_secs, geo_checks) {
                             isTRUE(rubika_res$reachable),
                             isTRUE(splus_res$reachable)))
 
-  # Intercepted by a corporate gateway on any probe domain
   any_intercepted <- isTRUE(bale_res$intercepted) ||
                      isTRUE(rubika_res$intercepted) ||
                      isTRUE(splus_res$intercepted)
@@ -539,19 +560,18 @@ test_proxy <- function(proxy_str, timeout_secs, geo_checks) {
                 bale=FALSE, bale_status=first_int$status,
                 iran_probe_score=0L,
                 https_status=NA_integer_, https_url="",
-                final_url=first_int$final_url %||% ""))
+                final_url=first_int$final_url %||% "",
+                sni_connect_ip=NA_character_, sni_fake_sni=NA_character_))
   }
 
   if (iran_probe_score >= 1L) {
-    # Bale responds via plain HTTP - now test whether the proxy supports
-    # HTTPS CONNECT (what browsers actually need for web.bale.ai).
     https_res <- check_bale_https(proxy_url, timeout_secs)
 
     tier <- switch(https_res$tunnel,
-      "open-200"     = "bale-tunnel",          # browser can reach web.bale.ai
-      "open-blocked" = "bale-tunnel-blocked",  # tunnel open, Bale blocks exit IP
-      "open-other"   = "bale-tunnel",          # other 2xx/5xx - tunnel works
-      "bale-bridge"                            # HTTPS CONNECT failed, HTTP only
+      "open-200"     = "bale-tunnel",
+      "open-blocked" = "bale-tunnel-blocked",
+      "open-other"   = "bale-tunnel",
+      "bale-bridge"
     )
 
     return(list(proxy             = proxy_str,
@@ -565,14 +585,17 @@ test_proxy <- function(proxy_str, timeout_secs, geo_checks) {
                 iran_probe_score = iran_probe_score,
                 https_status     = https_res$https_status,
                 https_url        = https_res$https_url %||% "",
-                final_url        = bale_res$final_url %||% ""))
+                final_url        = bale_res$final_url %||% "",
+                sni_connect_ip   = NA_character_,
+                sni_fake_sni     = NA_character_))
   }
-  
-  # -- No tier passed ------------------------------------------------------------
+
+  # -- No tier passed --------------------------------------------------------
   list(proxy=proxy_str, ok=FALSE, tier="fail",
        country=country, score=hits, proto=proto,
        bale=FALSE, bale_status=NA_integer_,
-       https_status=NA_integer_, https_url="", final_url="")
+       https_status=NA_integer_, https_url="", final_url="",
+       sni_connect_ip=NA_character_, sni_fake_sni=NA_character_)
 }
 
 # -- 6 Load --------------------------------------------------------------------
@@ -591,9 +614,7 @@ total <- length(proxies)
 cat(sprintf("Loaded %d proxies  |  workers=%d  timeout=%ds\n\n",
             total, WORKERS, TIMEOUT))
 
-# -- Pre-test filter: remove corporate intercepting proxies --------------------
-# Zscaler and similar gateways show a login wall instead of forwarding traffic.
-# They waste test slots and produce misleading "working proxy" results.
+# -- Pre-test filter: remove corporate proxies --------------------------------
 corp_flags <- vapply(proxies, function(p) {
   ip <- strsplit(p, ":")[[1L]][1L]
   is_corporate_ip(ip)
@@ -608,19 +629,14 @@ if (n_corp > 0L) {
 }
 total <- length(proxies)
 
-# -- Pre-test ordering: most-promising candidates first ------------------------
-# Heuristic scoring based on IP range hints and port patterns.
-# Iranian IP ranges score highest, SOCKS ports score higher than HTTP.
-# This means you see useful results sooner without waiting for the full run.
+# -- Pre-test ordering --------------------------------------------------------
 pre_scores <- vapply(proxies, pretest_score, integer(1L))
 proxies    <- proxies[order(pre_scores, decreasing = TRUE)]
 
 cat(sprintf("Testing %d proxies after filtering (ordered by IR proximity)...\n\n",
             total))
 
-# -- Staleness check ------------------------------------------------------------
-# If the JSON contains scan_timestamp fields (written by scan.py), warn the user
-# when proxies are older than STALE_WARN_HOURS - dead proxies test as 0/3.
+# -- Staleness check ----------------------------------------------------------
 check_staleness <- function(path, warn_hours) {
   if (!grepl("\\.json$", path, ignore.case = TRUE)) return(invisible(NULL))
   tryCatch({
@@ -629,7 +645,6 @@ check_staleness <- function(path, warn_hours) {
     ts_vals <- vapply(items, function(x) x[["scan_timestamp"]] %||% "", character(1L))
     ts_vals <- ts_vals[nzchar(ts_vals)]
     if (length(ts_vals) == 0L) return(invisible(NULL))
-    # Parse the most recent timestamp
     latest <- max(as.POSIXct(ts_vals, format = "%Y-%m-%dT%H:%M:%SZ", tz = "UTC"),
                   na.rm = TRUE)
     age_h  <- as.numeric(difftime(Sys.time(), latest, units = "hours"))
@@ -648,8 +663,11 @@ check_staleness <- function(path, warn_hours) {
 }
 check_staleness(INPUT_FILE, STALE_WARN_HOURS)
 
-# -- 7 Run (Windows socket cluster OR Unix mclapply) ---------------------------
-worker_fn <- function(p) test_proxy(p, TIMEOUT, GEO_CHECKS)
+# -- Load SNI-fronting pairs (after staleness check, before workers start) ----
+SNI_PAIRS <- load_sni_pairs()
+
+# -- 7 Run --------------------------------------------------------------------
+worker_fn <- function(p) test_proxy(p, TIMEOUT, GEO_CHECKS, SNI_PAIRS)
 
 t0 <- proc.time()
 
@@ -657,21 +675,24 @@ if (.Platform$OS.type == "windows" && WORKERS > 1L) {
   cores <- min(WORKERS, detectCores(logical = TRUE))
   cat(sprintf("Starting Windows socket cluster with %d workers...\n\n", cores))
   cl <- makeCluster(cores)
-  on.exit(stopCluster(cl), add = TRUE)                   # always clean up
+  on.exit(stopCluster(cl), add = TRUE)
   clusterExport(cl, varlist = c("GEO_CHECKS", "TIMEOUT", "SOCKS5_PORTS",
                                 "BALE_ENDPOINTS", "RUBIKA_ENDPOINTS",
                                 "SPLUS_ENDPOINTS", "BALE_HTTPS_TARGET",
                                 "IRAN_NEIGHBOR_CC", "IRAN_REGIONAL_CC",
                                 "CORPORATE_RANGES", "INTERCEPTOR_DOMAINS",
+                                "SNI_PAIRS", "SNI_REAL_HOST",
+                                "SNI_FRONTING_PAIRS_DEFAULT",
                                 "ip_to_int", "is_in_cidr", "is_corporate_ip",
                                 "is_interceptor_url",
                                 "test_proxy", "check_bale",
                                 "check_iranian_infra", "check_bale_https",
+                                "check_sni_fronting", "load_sni_pairs",
                                 "run_checks", "priority_score", "%||%"),
                 envir = environment())
   clusterEvalQ(cl, suppressPackageStartupMessages(library(jsonlite)))
-  results_raw <- parLapplyLB(cl, proxies, worker_fn)     # LB = load-balanced
-  
+  results_raw <- parLapplyLB(cl, proxies, worker_fn)
+
 } else if (.Platform$OS.type == "unix" && WORKERS > 1L) {
   results_raw <- mclapply(proxies, worker_fn,
                           mc.cores = min(WORKERS, detectCores(logical=FALSE)),
@@ -683,89 +704,113 @@ if (.Platform$OS.type == "windows" && WORKERS > 1L) {
 
 elapsed <- (proc.time() - t0)[["elapsed"]]
 
-# -- 8 Print results -----------------------------------------------------------
+# -- 8 Print results ----------------------------------------------------------
 results <- do.call(rbind, lapply(seq_along(results_raw), function(i) {
   r <- results_raw[[i]]
-  # Crash guard: mclapply returns a character error string when a worker fails.
   if (!is.list(r)) {
     proxy_str <- if (i <= length(proxies)) proxies[[i]] else "unknown:0"
     cat(sprintf("[%4d/%d] %-26s  [ERROR] worker crashed\n", i, total, proxy_str))
     r <- list(proxy=proxy_str, ok=FALSE, tier="fail", country="?", score=0L,
               proto="?", bale=FALSE, bale_status=NA_integer_,
-              https_status=NA_integer_, https_url="", final_url="")
+              https_status=NA_integer_, https_url="", final_url="",
+              sni_connect_ip=NA_character_, sni_fake_sni=NA_character_)
   }
   proto_tag <- sprintf("%-6s", toupper(r$proto %||% "?"))
   tier <- r$tier %||% "fail"
   tag <- switch(tier,
-    "IR-exit"             = sprintf("[ OK ] IR-EXIT             (%s)", proto_tag),
-    "bale-tunnel"         = sprintf("[ OK ] BALE-TUNNEL         (%s) HTTP %s HTTPS %s",
+    "sni-fronting"        = sprintf("[ T0 ] SNI-FRONTING        (%s) via %s fake_sni=%s HTTP %s",
+                                     proto_tag,
+                                     r$sni_connect_ip %||% "?",
+                                     r$sni_fake_sni   %||% "?",
+                                     r$bale_status    %||% "?"),
+    "IR-exit"             = sprintf("[ T1 ] IR-EXIT             (%s)", proto_tag),
+    "bale-tunnel"         = sprintf("[ T2 ] BALE-TUNNEL         (%s) HTTP %s HTTPS %s",
                                      proto_tag,
                                      r$bale_status  %||% "?",
                                      r$https_status %||% "?"),
-    "bale-tunnel-blocked" = sprintf("[ ~~ ] BALE-TUNNEL-BLOCKED (%s) HTTPS %s (IP blocked by Bale)",
+    "bale-tunnel-blocked" = sprintf("[ T3 ] BALE-TUNNEL-BLOCKED (%s) HTTPS %s (IP blocked by Bale)",
                                      proto_tag, r$https_status %||% "?"),
-    "bale-bridge"         = sprintf("[ ~~ ] BALE-BRIDGE HTTP-only (%s) HTTP %s",
+    "bale-bridge"         = sprintf("[ T4 ] BALE-BRIDGE HTTP-only (%s) HTTP %s",
                                      proto_tag, r$bale_status %||% "?"),
     "intercepted"         = sprintf("[HIJACK] %s -> %s",
                                      r$country, r$final_url %||% "?"),
     sprintf("[FAIL ] %-4s %d/3 (%s)", r$country, r$score, proto_tag)
   )
   cat(sprintf("[%4d/%d] %-26s  %s\n", i, total, r$proxy, tag))
-  data.frame(proxy        = r$proxy,
-             ok           = isTRUE(r$ok),
-             tier         = tier,
-             country      = r$country,
-             score        = r$score,
-             proto        = r$proto        %||% "?",
-             bale         = isTRUE(r$bale),
-             bale_status  = r$bale_status  %||% NA_integer_,
-             https_status = r$https_status %||% NA_integer_,
-             https_url    = r$https_url    %||% "",
-             final_url    = r$final_url    %||% "",
+  data.frame(proxy          = r$proxy,
+             ok             = isTRUE(r$ok),
+             tier           = tier,
+             country        = r$country,
+             score          = r$score,
+             proto          = r$proto          %||% "?",
+             bale           = isTRUE(r$bale),
+             bale_status    = r$bale_status    %||% NA_integer_,
+             https_status   = r$https_status   %||% NA_integer_,
+             https_url      = r$https_url      %||% "",
+             final_url      = r$final_url      %||% "",
+             sni_connect_ip = r$sni_connect_ip %||% NA_character_,
+             sni_fake_sni   = r$sni_fake_sni   %||% NA_character_,
              stringsAsFactors = FALSE)
 }))
 
 # -- 9 Summary + save ---------------------------------------------------------
 passed           <- results[results$ok, , drop=FALSE]
-ir_exit          <- results[results$tier == "IR-exit",             , drop=FALSE]
-bale_tunnel      <- results[results$tier == "bale-tunnel",         , drop=FALSE]
-bale_tunnel_blk  <- results[results$tier == "bale-tunnel-blocked", , drop=FALSE]
-bale_bridge      <- results[results$tier == "bale-bridge",         , drop=FALSE]
-intercepted      <- results[results$tier == "intercepted",         , drop=FALSE]
+sni_fronting     <- results[results$tier == "sni-fronting",         , drop=FALSE]
+ir_exit          <- results[results$tier == "IR-exit",              , drop=FALSE]
+bale_tunnel      <- results[results$tier == "bale-tunnel",          , drop=FALSE]
+bale_tunnel_blk  <- results[results$tier == "bale-tunnel-blocked",  , drop=FALSE]
+bale_bridge      <- results[results$tier == "bale-bridge",          , drop=FALSE]
+intercepted      <- results[results$tier == "intercepted",          , drop=FALSE]
 
-# Priority scoring now uses https_status too
 if (nrow(passed) > 0L) {
   passed$priority <- mapply(priority_score,
                              passed$tier, passed$country, passed$score,
                              passed$proto, passed$bale_status, passed$https_status)
   passed <- passed[order(passed$priority, decreasing = TRUE), ]
-  ir_exit         <- passed[passed$tier == "IR-exit",             , drop=FALSE]
-  bale_tunnel     <- passed[passed$tier == "bale-tunnel",         , drop=FALSE]
-  bale_tunnel_blk <- passed[passed$tier == "bale-tunnel-blocked", , drop=FALSE]
-  bale_bridge     <- passed[passed$tier == "bale-bridge",         , drop=FALSE]
+  sni_fronting    <- passed[passed$tier == "sni-fronting",         , drop=FALSE]
+  ir_exit         <- passed[passed$tier == "IR-exit",              , drop=FALSE]
+  bale_tunnel     <- passed[passed$tier == "bale-tunnel",          , drop=FALSE]
+  bale_tunnel_blk <- passed[passed$tier == "bale-tunnel-blocked",  , drop=FALSE]
+  bale_bridge     <- passed[passed$tier == "bale-bridge",          , drop=FALSE]
 }
 
 cat(sprintf(
-  "\n%s\n IR-exit              : %d  (full IR routing)\n Bale-tunnel          : %d  (HTTPS tunnel to web.bale.ai works)\n Bale-tunnel-blocked  : %d  (tunnel works, Bale blocks exit IP)\n Bale-bridge HTTP-only: %d  (plain HTTP only, no HTTPS tunnel)\n Intercepted          : %d  (hijacked - NOT usable)\n Total passed: %d / %d  (%.1f%%)   Elapsed: %.0fs\n",
-  strrep("-", 56),
-  nrow(ir_exit), nrow(bale_tunnel), nrow(bale_tunnel_blk),
-  nrow(bale_bridge), nrow(intercepted),
+  "\n%s\n SNI-fronting (Tier 0)    : %d  (domain-fronted, DPI-resistant)\n IR-exit (Tier 1)         : %d  (full IR routing)\n Bale-tunnel (Tier 2)     : %d  (HTTPS tunnel to web.bale.ai works)\n Bale-tunnel-blk (Tier 3) : %d  (tunnel works, Bale blocks exit IP)\n Bale-bridge (Tier 4)     : %d  (plain HTTP only, no HTTPS tunnel)\n Intercepted              : %d  (hijacked - NOT usable)\n Total passed: %d / %d  (%.1f%%)   Elapsed: %.0fs\n",
+  strrep("-", 60),
+  nrow(sni_fronting), nrow(ir_exit), nrow(bale_tunnel),
+  nrow(bale_tunnel_blk), nrow(bale_bridge), nrow(intercepted),
   nrow(passed), total,
   if (total > 0L) 100 * nrow(passed) / total else 0,
   elapsed
 ))
 
-# Report intercepted proxies so the operator knows which ones were hijacked
 if (nrow(intercepted) > 0L) {
   cat("\nIntercepted proxies (connection hijacked - do NOT use):\n")
   for (i in seq_len(nrow(intercepted))) {
     cat(sprintf("  %-26s  redirected to: %s\n",
-                intercepted$proxy[i],
-                intercepted$final_url[i]))
+                intercepted$proxy[i], intercepted$final_url[i]))
   }
 }
 
 out_dir <- tryCatch(dirname(normalizePath(INPUT_FILE)), error=function(e) getwd())
+
+# Override with R_OUTPUT_DIR env var if set (used by GitHub Actions)
+r_out <- Sys.getenv("R_OUTPUT_DIR", "")
+if (nzchar(r_out) && dir.exists(r_out)) out_dir <- r_out
+
+if (nrow(sni_fronting) > 0L) {
+  cat("\nSNI-fronting proxies - domain-fronted via Cloudflare (best first):\n")
+  for (i in seq_len(nrow(sni_fronting)))
+    cat(sprintf("  [pri=%d] %-26s  %s | fake_sni=%s -> %s | HTTP %s\n",
+                sni_fronting$priority[i], sni_fronting$proxy[i],
+                sni_fronting$proto[i],
+                sni_fronting$sni_fake_sni[i],
+                sni_fronting$sni_connect_ip[i],
+                sni_fronting$bale_status[i]))
+  writeLines(sni_fronting$proxy, file.path(out_dir, "passing_sni_fronting.txt"))
+  write_json(sni_fronting, file.path(out_dir, "passing_sni_fronting.json"),
+             pretty=TRUE, auto_unbox=TRUE)
+}
 
 if (nrow(ir_exit) > 0L) {
   cat("\nIR-exit proxies (best first):\n")
@@ -818,19 +863,29 @@ if (nrow(passed) > 0L) {
   write_json(passed, file.path(out_dir, "passing_all_ranked.json"),
              pretty=TRUE, auto_unbox=TRUE)
 
-  # Print setup instructions for the #1 proxy
   top      <- passed$proxy[1]
   top_tier <- passed$tier[1]
   top_parts <- strsplit(top, ":")[[1L]]
   cat(sprintf("\n-- Use the top proxy (%s, tier=%s) --\n", top, top_tier))
-  cat(sprintf("  Windows proxy settings: %s  port %s\n", top_parts[1], top_parts[2]))
-  cat(sprintf("  curl.exe test: curl.exe -x http://%s -k https://web.bale.ai/ -I\n", top))
+  if (top_tier == "sni-fronting") {
+    top_sni_ip  <- passed$sni_connect_ip[1]
+    top_sni_fqn <- passed$sni_fake_sni[1]
+    cat(sprintf("  config.json: CONNECT_IP=%s  FAKE_SNI=%s  CONNECT_PORT=443\n",
+                top_sni_ip, top_sni_fqn))
+    cat(sprintf("  curl test: curl -x http://%s --tls-servername %s "
+                "--resolve tapi.bale.ai:443:%s -k https://tapi.bale.ai/ -I\n",
+                top, top_sni_fqn, top_sni_ip))
+  } else {
+    cat(sprintf("  Windows proxy settings: %s  port %s\n", top_parts[1], top_parts[2]))
+    cat(sprintf("  curl test: curl -x http://%s -k https://web.bale.ai/ -I\n", top))
+  }
 }
 
 if (nrow(passed) == 0L) cat("\nNo working proxies found.\n")
 
 if (nrow(passed) > 0L) {
   cat(sprintf("\nSaved to %s:\n", out_dir))
+  if (nrow(sni_fronting)    > 0L) cat("  passing_sni_fronting.txt / .json\n")
   if (nrow(ir_exit)         > 0L) cat("  passing_ir_exit.txt / .json\n")
   if (nrow(bale_tunnel)     > 0L) cat("  passing_bale_tunnel.txt / .json\n")
   if (nrow(bale_tunnel_blk) > 0L) cat("  passing_bale_tunnel_blocked.txt / .json\n")
@@ -838,7 +893,7 @@ if (nrow(passed) > 0L) {
   cat("  passing_all_ranked.txt / .json  (all tiers, priority-sorted)\n")
 }
 
-# -- Country breakdown (all tested, not just passing) --------------------------
+# -- Country breakdown --------------------------------------------------------
 cat(sprintf("\n%s\n Country breakdown (all %d tested)\n%s\n",
             strrep("-", 40), total, strrep("-", 40)))
 country_tbl <- sort(table(results$country), decreasing = TRUE)
@@ -855,4 +910,14 @@ cat(sprintf("\n Protocol breakdown\n%s\n", strrep("-", 40)))
 proto_tbl <- sort(table(results$proto), decreasing = TRUE)
 for (i in seq_along(proto_tbl)) {
   cat(sprintf("  %-8s %4d\n", names(proto_tbl)[i], proto_tbl[[i]]))
+}
+
+# SNI-fronting pair usage summary
+if (nrow(sni_fronting) > 0L) {
+  cat(sprintf("\n SNI-fronting pair usage\n%s\n", strrep("-", 40)))
+  sni_tbl <- sort(table(paste0(sni_fronting$sni_connect_ip, " / ",
+                               sni_fronting$sni_fake_sni)), decreasing = TRUE)
+  for (i in seq_along(sni_tbl)) {
+    cat(sprintf("  %-55s %4d\n", names(sni_tbl)[i], sni_tbl[[i]]))
+  }
 }
