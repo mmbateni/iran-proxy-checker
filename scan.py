@@ -1,23 +1,19 @@
 #!/usr/bin/env python3
 """
-Iran Network Scanner - Enhanced Edition v2
+Iran Network Scanner - Enhanced Edition v2.2
 ============================================
 Robust discovery of routable Iranian ASNs and working proxies.
 
-Improvements over v1:
-  - RIPE NCC delegated stats file (direct prefix + ASN list, no BGP needed)
-  - Hurricane Electric BGP country scraper
-  - Cloudflare Radar ASN list (requires CLOUDFLARE_API_TOKEN)
-  - Shadowserver BGP prefix data
-  - Exponential-backoff retry on all RIPE Stat API calls
-  - Masscan rate raised to 5000 pps
-  - Stratified random IP sampling across full prefix range
-  - Two-hop BGP neighbour expansion
-  - IPv6 prefix discovery and storage
-  - Multi-target proxy verification (2-of-3 geolocation sources must agree)
+v2.2 changes:
+  - Added SNI-fronting discovery (probe_sni_fronting, discover_sni_fronting_pairs)
+    Replicates the patterniha domain-fronting technique in pure asyncio:
+    TLS ClientHello carries a whitelisted fake SNI while the payload targets
+    Iranian infrastructure (tapi.bale.ai).  DPI sees only the CF-whitelisted SNI.
+  - New --sni-fronting CLI flag; emits working_sni_fronting.json
+  - CLOUDFLARE_WHITELIST_SNIS and CF_PROBE_RANGES constants added
 
 v2.1 changes:
-  - Added Rubika (web.rubika.ir) and Splus (web.splus.ir) as additional
+  - Added Rubika (rubika.ir) and Splus (splus.ir) as additional
     application-level Iranian infrastructure probes alongside Bale.
   - Tier-2 EU->IR bridge detection now uses a concurrent 1-of-3 probe vote
     (Bale / Rubika / Splus) via asyncio.gather — no added latency vs. v2.
@@ -36,6 +32,7 @@ import random
 import re
 import shutil
 import socket
+import ssl
 import sys
 from collections import Counter, defaultdict
 from datetime import datetime
@@ -52,8 +49,6 @@ MIN_CONFIDENCE       = int(os.environ.get("MIN_CONFIDENCE", "1"))
 HTTP_TIMEOUT         = int(os.environ.get("HTTP_TIMEOUT", "7"))
 
 # Known Armenian ASNs - carriers with documented BGP peering into Iran
-# ArmenTel (AS12297) -> TCI (AS12880); Ucom (AS43733) -> MCI (AS197207);
-# VivaCell-MTS (AS44395) -> Irancell (AS44244).
 ARMENIA_SEED_ASNS = [
     12297,   # ArmenTel / Telecom Armenia
     43733,   # Ucom LLC
@@ -67,7 +62,6 @@ ARMENIA_SEED_ASNS = [
     210756,  # Armex Technologies
 ]
 
-# Armenian domains hosted on Armenian infrastructure (for DNS seeding)
 ARMENIA_SEED_DOMAINS = [
     "ucom.am", "mts.am", "beeline.am", "rostelecom.am",
     "armentel.com", "arminco.com", "gnc.am",
@@ -75,73 +69,33 @@ ARMENIA_SEED_DOMAINS = [
     "gov.am", "police.am", "mfa.am",
 ]
 
-# -- European bridge configuration ---------------------------------------------
-# Bale (bale.ai) is an Iranian messaging platform reachable from European IPs
-# (confirmed: Germany) but NOT from North America (Azure/GitHub runner IPs).
-# This asymmetry makes Bale a reliable application-level probe: any proxy
-# whose exit can reach Bale has a valid routing path into Iranian infrastructure,
-# regardless of whether the exit IP geo-locates to Iran.
-#
-# Verification logic (see verify_proxy_http):
-#   Tier 1 (standard)  - 2-of-3 geo sources agree exit = IR  -> accept as IR proxy
-#   Tier 2 (EU bridge) - exit geo = EU AND bale reachable    -> accept as EU->IR bridge
-#   Tier 3 (any-geo)   - 1-of-3 geo passes AND bale reachable -> accept as unconfirmed bridge
-#
-# TCP connect to these hostnames/ports is sufficient - no auth needed.
 BALE_TEST_ENDPOINTS: List[Tuple[str, int]] = [
-    ("tapi.bale.ai",  443),   # Bot API - most reliable, always up
-    ("bale.ai",       443),   # Main site
-    ("bale.ai",        80),   # HTTP fallback
+    ("tapi.bale.ai",  443),
+    ("bale.ai",       443),
+    ("bale.ai",        80),
 ]
 BALE_TCP_TIMEOUT = float(os.environ.get("BALE_TCP_TIMEOUT", "5.0"))
 
-# Rubika (rubika.ir) — Iranian social/messaging platform, self-hosted on Iranian
-# infrastructure. Reachable from EU IPs but NOT from North American
-# (Azure/GitHub runner) IPs — the same asymmetry as Bale, independent CDN path.
 RUBIKA_TEST_ENDPOINTS: List[Tuple[str, int]] = [
     ("web.rubika.ir", 443),
     ("rubika.ir",     443),
     ("rubika.ir",      80),
 ]
 
-# Splus (splus.ir) — Iranian media streaming platform, self-hosted on Iranian
-# infrastructure. Third independent routing signal; reduces false positives
-# when a single platform has a temporary outage or CDN path change.
 SPLUS_TEST_ENDPOINTS: List[Tuple[str, int]] = [
     ("web.splus.ir", 443),
     ("splus.ir",     443),
     ("splus.ir",      80),
 ]
 
-# European ASNs that host large concentrations of Iranian-operated VPN/proxy
-# servers.  Many Iranian users/operators rent servers here because:
-#  - German/EU DCs have fast connectivity to Iranian IPs via DE-CIX peering
-#  - Hetzner, Contabo, etc. are cheap and accept crypto payment
-#  - These IPs are not blocked by Iranian censors (unlike US/UK ranges)
 EUROPEAN_BRIDGE_ASNS: List[int] = [
-    # Germany - primary
-    24940,   # Hetzner Online GmbH (largest Iranian VPS concentration)
-    51167,   # Contabo GmbH
-    8560,    # IONOS SE (1&1)
-    3320,    # Deutsche Telekom AG
-    680,     # DFN (German research network, often peered with Iranian unis)
-    13184,   # Adolf W??rth GmbH / AS used by several DE ISPs
-    29066,   # Vodafone Germany
-    # Netherlands - strong DE-CIX / AMS-IX peering into Iran
-    16276,   # OVH SAS (FR/NL DCs)
-    60781,   # LeaseWeb Netherlands
-    20738,   # Serverius
-    # France
-    12876,   # SCALEWAY (formerly Online SAS)
-    # General EU hosting with confirmed Iranian user base
-    34119,   # Wildcard UK/EU hosting
-    47583,   # Hostinger International
+    24940, 51167, 8560, 3320, 680, 13184, 29066,
+    16276, 60781, 20738,
+    12876,
+    34119, 47583,
 ]
 
-# Fallback IP prefixes for the European bridge ASNs above.
-# Used when RIPE Stat API fails for these ASNs.
 EUROPEAN_BRIDGE_PREFIXES: List[str] = [
-    # Hetzner
     "5.9.0.0/16", "5.161.0.0/16", "23.88.0.0/17", "65.21.0.0/16",
     "65.108.0.0/16", "65.109.0.0/16", "78.46.0.0/15", "88.198.0.0/16",
     "95.216.0.0/16", "116.202.0.0/15", "128.140.0.0/17", "135.181.0.0/16",
@@ -149,39 +103,59 @@ EUROPEAN_BRIDGE_PREFIXES: List[str] = [
     "148.251.0.0/16", "157.90.0.0/16", "159.69.0.0/16", "162.55.0.0/16",
     "167.233.0.0/16", "168.119.0.0/16", "176.9.0.0/16", "178.63.0.0/16",
     "188.34.0.0/16", "193.25.134.0/23", "195.201.0.0/16", "213.239.192.0/18",
-    # Contabo
     "144.91.64.0/18", "173.212.192.0/18", "185.238.240.0/22",
     "194.163.128.0/17", "213.136.64.0/18",
-    # OVH Germany/France
     "5.135.0.0/16", "51.68.0.0/16", "51.75.0.0/16", "51.77.0.0/16",
     "54.36.0.0/16", "87.98.128.0/17", "91.121.0.0/16", "137.74.0.0/16",
     "145.239.0.0/16", "149.202.0.0/16", "151.80.0.0/16", "188.165.0.0/16",
     "193.70.0.0/17",
 ]
 
-# Known Iranian ASNs (seed list)
+# -- SNI-fronting discovery configuration ------------------------------------
+# Cloudflare-hosted domains observed to be whitelisted by Iranian DPI.
+# DPI allows TLS ClientHellos carrying these SNIs through uninspected.
+# Extend this list as new whitelisted SNIs are discovered in the wild.
+CLOUDFLARE_WHITELIST_SNIS: List[str] = [
+    "static.cloudflareinsights.com",
+    "auth.vercel.com",
+    "cdnjs.cloudflare.com",
+    "ajax.cloudflare.com",
+    "challenges.cloudflare.com",
+    "www.cloudflare.com",
+    "blog.cloudflare.com",
+    "speed.cloudflare.com",
+    "developers.cloudflare.com",
+]
+
+# Cloudflare anycast ranges to probe for SNI-fronting.
+# These ranges carry Cloudflare's reverse-proxy traffic (not just DNS/registrar).
+CF_PROBE_RANGES: List[str] = [
+    "104.16.0.0/13",
+    "104.24.0.0/14",
+    "172.64.0.0/13",
+    "188.114.96.0/20",
+    "198.41.128.0/17",
+    "162.158.0.0/15",
+    "141.101.64.0/18",
+]
+
 SEED_ASNS = [
     43754, 62229, 48159, 12880, 16322, 42337, 49666, 21341, 24631,
     56402, 31549, 44244, 197207, 58224, 39501, 57218, 25184, 51695, 47262,
     64422, 205585,
-    202468,   # Noyan Abr Arvan Co. (Arvan Cloud) — confirmed 2026-04-12:
-              # 37.32.26.30 (mail.paya.ir) observed routing internationally
+    202468,
 ]
 
-# Iranian domains for DNS seeding (all confirmed self-hosted on Iranian infra)
 SEED_DOMAINS = [
     "telewebion.ir", "farsnews.ir", "tasnimnews.ir", "sepehrtv.ir",
     "parsatv.com", "irna.ir", "isna.ir", "mehrnews.com", "iribnews.ir",
     "varzesh3.com", "namasha.com", "filimo.com", "aparat.com", "digikala.com",
     "snapp.ir", "irancell.ir", "mci.ir", "tic.ir",
-    # Extra ISP/bank/ministry domains (reliably self-hosted)
     "shatel.ir", "rightel.com", "bmi.ir", "bankmellat.ir",
     "behdasht.gov.ir", "moe.gov.ir",
-    # Arvan Cloud (AS202468) hosted — confirmed Iranian intranet + intl routing
     "paya.ir",
 ]
 
-# Bogon prefixes to filter
 BOGON_RANGES = [
     "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8",
     "169.254.0.0/16", "172.16.0.0/12", "192.0.0.0/24", "192.0.2.0/24",
@@ -189,67 +163,32 @@ BOGON_RANGES = [
     "224.0.0.0/4", "240.0.0.0/4", "255.255.255.255/32"
 ]
 
-# CDN anycast ranges - these IPs always have ports open but are NOT proxies.
-# Cloudflare anycast in particular (173.245.48.0/20, 104.16.0.0/13, etc.)
-# geo-locates to CA/US from North America and floods scan results with
-# false positives that pass the TCP-open check but fail all geo verifications.
-# Also filters Akamai, Fastly, and AWS CloudFront anycast blocks.
 CDN_RANGES = [
-    # Cloudflare
-    "173.245.48.0/20",
-    "103.21.244.0/22",
-    "103.22.200.0/22",
-    "103.31.4.0/22",
-    "141.101.64.0/18",
-    "108.162.192.0/18",
-    "190.93.240.0/20",
-    "188.114.96.0/20",
-    "197.234.240.0/22",
-    "198.41.128.0/17",
-    "162.158.0.0/15",
-    "104.16.0.0/13",
-    "104.24.0.0/14",
-    "172.64.0.0/13",
-    "131.0.72.0/22",
-    # Fastly
-    "23.235.32.0/20",
-    "43.249.72.0/22",
-    "103.244.50.0/24",
-    "103.245.222.0/23",
-    "103.245.224.0/24",
-    "104.156.80.0/20",
-    "151.101.0.0/16",
-    "157.52.192.0/18",
-    "167.82.0.0/17",
-    "167.82.128.0/20",
-    "167.82.160.0/20",
-    "167.82.224.0/20",
+    "173.245.48.0/20", "103.21.244.0/22", "103.22.200.0/22",
+    "103.31.4.0/22", "141.101.64.0/18", "108.162.192.0/18",
+    "190.93.240.0/20", "188.114.96.0/20", "197.234.240.0/22",
+    "198.41.128.0/17", "162.158.0.0/15", "104.16.0.0/13",
+    "104.24.0.0/14", "172.64.0.0/13", "131.0.72.0/22",
+    "23.235.32.0/20", "43.249.72.0/22", "103.244.50.0/24",
+    "103.245.222.0/23", "103.245.224.0/24", "104.156.80.0/20",
+    "151.101.0.0/16", "157.52.192.0/18", "167.82.0.0/17",
+    "167.82.128.0/20", "167.82.160.0/20", "167.82.224.0/20",
     "199.27.72.0/21",
-    # Akamai
-    "23.32.0.0/11",
-    "23.64.0.0/14",
-    "23.192.0.0/11",
-    "96.16.0.0/15",
-    "96.6.0.0/15",
-    "184.24.0.0/13",
-    "184.50.0.0/15",
-    "184.84.0.0/14",
+    "23.32.0.0/11", "23.64.0.0/14", "23.192.0.0/11",
+    "96.16.0.0/15", "96.6.0.0/15", "184.24.0.0/13",
+    "184.50.0.0/15", "184.84.0.0/14",
 ]
 
-# Build parsed CDN networks once at module load for fast lookup
 _CDN_NETS = [ipaddress.IPv4Network(r, strict=False) for r in CDN_RANGES]
 
-# Proxy ports to scan
 PROXY_PORTS = [80, 443, 1080, 3128, 8080, 8088, 8118, 8888, 9999]
 
-# Fallback prefixes if ASN DB is empty
 FALLBACK_PREFIXES = [
     "5.160.0.0/12", "78.38.0.0/15", "151.232.0.0/13", "185.112.32.0/22",
     "185.141.104.0/22", "185.173.128.0/22", "185.236.172.0/22",
-    "37.32.0.0/13",   # Arvan Cloud / AS202468 — confirmed 2026-04-12
+    "37.32.0.0/13",
 ]
 
-# Public proxy list sources
 PROXY_SOURCES = [
     "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/http.txt",
     "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/socks4.txt",
@@ -258,8 +197,6 @@ PROXY_SOURCES = [
     "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies.txt",
 ]
 
-# Multi-target verification endpoints: (url, json_key, expected_value)
-# A proxy must satisfy at least 2 of these 3 to be accepted.
 VERIFICATION_TARGETS = [
     ("http://ip-api.com/json/?fields=status,countryCode", "countryCode", "IR"),
     ("http://ipwho.is/",                                  "country_code", "IR"),
@@ -269,7 +206,6 @@ VERIFICATION_TARGETS = [
 # ---------- Helper functions ----------
 
 def is_cdn_ip(ip_str: str) -> bool:
-    """Return True if ip_str falls within any known CDN anycast range."""
     try:
         ip = ipaddress.IPv4Address(ip_str)
         return any(ip in net for net in _CDN_NETS)
@@ -277,7 +213,6 @@ def is_cdn_ip(ip_str: str) -> bool:
         return False
 
 def is_cdn_prefix(prefix: str) -> bool:
-    """Return True if prefix overlaps with any known CDN anycast range."""
     try:
         net = ipaddress.IPv4Network(prefix, strict=False)
         return any(net.overlaps(cdn) for cdn in _CDN_NETS)
@@ -314,16 +249,12 @@ def cidr_first_host(cidr: str) -> Optional[str]:
         return None
 
 def stratified_sample_ips(prefix: str, max_samples: int = 100) -> List[str]:
-    """
-    Sample IPs spread across the *entire* prefix range, not just the start.
-    Divides the usable host space into equal buckets and picks one IP per bucket.
-    """
     try:
         net = ipaddress.IPv4Network(prefix, strict=False)
         total = net.num_addresses
         if total <= 2:
             return []
-        usable = total - 2  # exclude network + broadcast
+        usable = total - 2
         if usable <= max_samples:
             return [str(net.network_address + i + 1) for i in range(usable)]
         step = usable // max_samples
@@ -349,7 +280,6 @@ async def fetch_json_with_retry(url: str, session: aiohttp.ClientSession,
                                  max_retries: int = 4,
                                  timeout: int = 30,
                                  params: dict = None) -> Optional[dict]:
-    """GET a JSON endpoint with exponential backoff on failure / rate-limit."""
     for attempt in range(max_retries):
         try:
             async with session.get(url, timeout=timeout, params=params) as resp:
@@ -372,10 +302,6 @@ async def fetch_json_with_retry(url: str, session: aiohttp.ClientSession,
 # ---------- RIPE Stat API ----------
 
 async def fetch_ripe_prefixes(asn: int) -> Tuple[List[str], List[str]]:
-    """
-    Fetch announced IPv4 and IPv6 prefixes for an ASN from RIPE Stat.
-    Returns (ipv4_prefixes, ipv6_prefixes).
-    """
     url = f"https://stat.ripe.net/data/announced-prefixes/data.json?resource=AS{asn}"
     try:
         async with aiohttp.ClientSession() as session:
@@ -390,7 +316,6 @@ async def fetch_ripe_prefixes(asn: int) -> Tuple[List[str], List[str]]:
         return [], []
 
 async def fetch_asn_neighbours(asn: int) -> List[int]:
-    """Fetch BGP neighbours for an ASN from RIPE Stat (with retry)."""
     url = f"https://stat.ripe.net/data/asn-neighbours/data.json?resource=AS{asn}"
     try:
         async with aiohttp.ClientSession() as session:
@@ -402,14 +327,9 @@ async def fetch_asn_neighbours(asn: int) -> List[int]:
     except Exception:
         return []
 
-# ---------- RIPE NCC Delegated Stats (NEW) ----------
+# ---------- RIPE NCC Delegated Stats ----------
 
 async def fetch_ripe_delegated() -> Tuple[List[int], List[str]]:
-    """
-    Parse the RIPE NCC delegated extended stats file to directly extract
-    all Iranian ASNs and IPv4 prefixes. Much more complete than BGP-only.
-    Returns (asn_list, ipv4_prefix_list).
-    """
     url = "https://ftp.ripe.net/pub/stats/ripencc/delegated-ripencc-extended-latest"
     asns: List[int] = []
     prefixes: List[str] = []
@@ -422,7 +342,7 @@ async def fetch_ripe_delegated() -> Tuple[List[int], List[str]]:
                     return [], []
                 text = await resp.text()
         for line in text.splitlines():
-            if line.startswith("#") or line.startswith("2"):  # skip headers/summary
+            if line.startswith("#") or line.startswith("2"):
                 continue
             parts = line.split("|")
             if len(parts) < 5:
@@ -449,10 +369,9 @@ async def fetch_ripe_delegated() -> Tuple[List[int], List[str]]:
         print(f"  RIPE delegated fetch error: {e}")
     return asns, prefixes
 
-# ---------- Hurricane Electric BGP (NEW) ----------
+# ---------- Hurricane Electric BGP ----------
 
 async def fetch_he_asns() -> List[int]:
-    """Scrape Hurricane Electric BGP toolkit for Iranian ASNs."""
     url = "https://bgp.he.net/country/IR"
     print("Fetching Hurricane Electric ASN list ...")
     try:
@@ -470,10 +389,9 @@ async def fetch_he_asns() -> List[int]:
         print(f"  HE BGP fetch error: {e}")
         return []
 
-# ---------- Cloudflare Radar (NEW) ----------
+# ---------- Cloudflare Radar ----------
 
 async def fetch_cloudflare_radar_asns() -> List[int]:
-    """Fetch Iranian ASNs from Cloudflare Radar (requires CLOUDFLARE_API_TOKEN)."""
     if not CLOUDFLARE_API_TOKEN:
         print("  Cloudflare Radar: CLOUDFLARE_API_TOKEN not set, skipping")
         return []
@@ -493,13 +411,9 @@ async def fetch_cloudflare_radar_asns() -> List[int]:
         print(f"  Cloudflare Radar fetch error: {e}")
         return []
 
-# ---------- Shadowserver BGP (NEW) ----------
+# ---------- Shadowserver BGP ----------
 
 async def fetch_shadowserver_prefixes() -> List[str]:
-    """
-    Fetch Iranian IPv4 prefixes from Shadowserver's BGP summary.
-    Uses their country-level BGP view (no auth required).
-    """
     url = "https://bgp.shadowserver.org/country/IR/prefixes"
     print("Fetching Shadowserver BGP prefix list ...")
     try:
@@ -530,7 +444,6 @@ async def resolve_domain(domain: str) -> List[str]:
         return []
 
 async def whois_cymru(ips: List[str]) -> Dict[str, dict]:
-    """Query Team Cymru WHOIS for IPs. Returns dict ip -> info."""
     if not ips:
         return {}
     result = {}
@@ -571,10 +484,9 @@ async def discover_asns_via_dns() -> List[int]:
     print(f"  DNS discovery: {len(asns)} ASNs")
     return list(asns)
 
-# ---------- BGP neighbour expansion (two-hop) ----------
+# ---------- BGP neighbour expansion ----------
 
 async def expand_via_neighbours(seed_asns: List[int], min_shared: int = 2) -> List[int]:
-    """First-hop: find ASNs that peer with >= min_shared seed ASNs."""
     peer_count: Counter = Counter()
     for asn in seed_asns:
         neighbours = await fetch_asn_neighbours(asn)
@@ -587,10 +499,6 @@ async def expand_via_neighbours(seed_asns: List[int], min_shared: int = 2) -> Li
 
 async def expand_two_hop(seed_asns: List[int], first_hop: List[int],
                           min_shared: int = 1) -> List[int]:
-    """
-    Second-hop: find ASNs that peer with >= min_shared first-hop ASNs
-    and are not already known. Capped at 30 first-hop ASNs to limit API calls.
-    """
     all_known = set(seed_asns) | set(first_hop)
     peer_count: Counter = Counter()
     for asn in first_hop[:30]:
@@ -605,7 +513,6 @@ async def expand_two_hop(seed_asns: List[int], first_hop: List[int],
 # ---------- RIPE Atlas ----------
 
 async def run_atlas(asns: List[int], api_key: str) -> dict:
-    """Trigger RIPE Atlas traceroutes (unchanged from v1)."""
     print(f"Running RIPE Atlas measurements for {len(asns)} ASNs ...")
     results = {}
     async with aiohttp.ClientSession() as session:
@@ -713,26 +620,147 @@ async def run_reverse(ips: List[str], ipinfo_token: str) -> dict:
             })["responsive_ips"].append(r["ip"])
     return {"routable_asns": list(asn_map.values()), "all_records": results}
 
+# ---------- SNI-fronting discovery ------------------------------------------
+
+async def probe_sni_fronting(
+    connect_ip: str,
+    fake_sni: str,
+    real_host: str = "tapi.bale.ai",
+    port: int = 443,
+    timeout: float = 5.0,
+) -> bool:
+    """
+    Attempt a TLS connection to connect_ip:port with fake_sni in the
+    ClientHello, then send an HTTP/1.1 HEAD request targeting real_host.
+
+    This replicates the patterniha domain-fronting technique in pure asyncio:
+      - Iranian DPI inspects the TLS ClientHello SNI field and sees fake_sni
+        (a Cloudflare-whitelisted domain) -> connection is allowed through.
+      - Cloudflare's edge terminates TLS and routes based on the HTTP Host
+        header (real_host) -> request reaches Iranian infrastructure.
+
+    Returns True if any HTTP response is received (including 4xx/5xx),
+    confirming that the fronting path to real_host is open.
+    """
+    try:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(
+                connect_ip, port,
+                ssl=ctx,
+                server_hostname=fake_sni,   # fake SNI injected into TLS ClientHello
+            ),
+            timeout=timeout,
+        )
+        req = (
+            f"HEAD / HTTP/1.1\r\n"
+            f"Host: {real_host}\r\n"
+            f"User-Agent: Mozilla/5.0 (compatible; IranNetScanner/2.2)\r\n"
+            f"Connection: close\r\n\r\n"
+        )
+        writer.write(req.encode())
+        await writer.drain()
+        resp = await asyncio.wait_for(reader.read(512), timeout=timeout)
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except Exception:
+            pass
+        return b"HTTP/" in resp
+    except Exception:
+        return False
+
+
+async def discover_sni_fronting_pairs(
+    max_ips_per_range: int = 10,
+    output_file: str = "working_sni_fronting.json",
+    real_host: str = "tapi.bale.ai",
+    sni_timeout: float = 5.0,
+) -> List[dict]:
+    """
+    Probe Cloudflare anycast ranges for working (connect_ip, fake_sni) pairs
+    that can front connections to Iranian infrastructure (real_host).
+
+    A working pair means:
+      - DPI sees the whitelisted fake_sni in the TLS ClientHello -> allowed
+      - Cloudflare routes the request to real_host -> Iranian infra responds
+      - The proxy operator can use this pair in SNI-spoofing configs
+
+    Results are written to output_file (JSON) and returned as a list of dicts.
+    Each dict: { connect_ip, fake_sni, port, real_host, discovered }
+    """
+    candidates: List[str] = []
+    for prefix in CF_PROBE_RANGES:
+        candidates.extend(
+            stratified_sample_ips(prefix, max_samples=max_ips_per_range)
+        )
+
+    total_probes = len(candidates) * len(CLOUDFLARE_WHITELIST_SNIS)
+    print(f"SNI-fronting discovery: {len(candidates)} Cloudflare IPs x "
+          f"{len(CLOUDFLARE_WHITELIST_SNIS)} SNIs = {total_probes} probes "
+          f"(target: {real_host}) ...")
+
+    working: List[dict] = []
+    seen_ips: set = set()
+    sem = asyncio.Semaphore(200)
+    lock = asyncio.Lock()
+
+    async def probe_one(ip: str, sni: str) -> None:
+        async with sem:
+            async with lock:
+                if ip in seen_ips:
+                    return
+            ok = await probe_sni_fronting(
+                ip, sni, real_host=real_host, timeout=sni_timeout
+            )
+            if ok:
+                async with lock:
+                    if ip not in seen_ips:
+                        seen_ips.add(ip)
+                        entry = {
+                            "connect_ip": ip,
+                            "fake_sni":   sni,
+                            "port":       443,
+                            "real_host":  real_host,
+                            "discovered": datetime.utcnow().strftime(
+                                "%Y-%m-%dT%H:%M:%SZ"
+                            ),
+                        }
+                        working.append(entry)
+                        print(f"  [SNI-fronting] {ip}  fake_sni={sni}")
+
+    tasks = [
+        probe_one(ip, sni)
+        for ip in candidates
+        for sni in CLOUDFLARE_WHITELIST_SNIS
+    ]
+    await asyncio.gather(*tasks)
+
+    print(f"SNI-fronting discovery complete: {len(working)} working pairs found.")
+    if working:
+        with open(output_file, "w") as f:
+            json.dump(working, f, indent=2)
+        print(f"  Saved to {output_file}")
+    else:
+        print(f"  No working pairs found — {real_host} may be unreachable from "
+              f"this runner. Run again from a European IP for better results.")
+    return working
+
 # ---------- Proxy scanning ----------
 
 async def scan_prefix_with_masscan(prefix: str,
                                     per_prefix_timeout: int = 90) -> List[str]:
-    """
-    Use masscan at 5000 pps to scan an entire prefix for open proxy ports.
-
-    FIX: Added per_prefix_timeout (default 90 s) so that a stalled masscan
-    process cannot block the pipeline indefinitely.  90 s is enough for a full
-    /16 at 5 000 pps with margin; anything larger / slower is skipped.
-    """
     if not shutil.which("masscan"):
         return []
     ports = ",".join(str(p) for p in PROXY_PORTS)
     cmd = [
         "masscan", prefix,
         "-p", ports,
-        "--rate=5000",        # raised from 1000
+        "--rate=5000",
         "--open-only",
-        "--banners",          # grab HTTP banners for early non-proxy filtering
+        "--banners",
         "-oJ", "-",
     ]
     try:
@@ -741,7 +769,6 @@ async def scan_prefix_with_masscan(prefix: str,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        # FIX: wrap communicate() in wait_for so a hung masscan can't stall forever
         try:
             stdout, _ = await asyncio.wait_for(
                 proc.communicate(), timeout=per_prefix_timeout
@@ -765,12 +792,6 @@ async def scan_prefix_with_masscan(prefix: str,
         return []
 
 async def scan_prefix_async(prefix: str, max_samples: int = 100) -> List[str]:
-    """
-    Async TCP scanning using stratified sampling across the full prefix.
-    max_samples controls how many IPs are probed per prefix.
-    Use the default (100) for Iranian prefixes; pass 20 for EU bridge prefixes
-    to keep scan time bounded.
-    """
     sample_ips = stratified_sample_ips(prefix, max_samples=max_samples)
     candidates = []
     tasks = []
@@ -794,14 +815,6 @@ async def _probe_endpoints(
     proxy_url: str,
     timeout: float = BALE_TCP_TIMEOUT,
 ) -> bool:
-    """
-    Generic Iranian-infrastructure probe helper.
-
-    Sends an HTTP HEAD through proxy_url to each (host, port) in endpoints.
-    Returns True on the first response that is not 407 (proxy auth required).
-    Any non-407 status means the proxy routed the packet to the destination.
-    Used by check_bale_reachable, check_rubika_reachable, check_splus_reachable.
-    """
     for host, port in endpoints:
         url = f"http{'s' if port == 443 else ''}://{host}/"
         try:
@@ -813,74 +826,36 @@ async def _probe_endpoints(
                     allow_redirects=True,
                     ssl=False,
                 ) as resp:
-                    # 407 = proxy auth required: blocked before reaching destination
                     if resp.status < 600 and resp.status != 407:
                         return True
         except aiohttp.ClientResponseError as e:
             if e.status != 407:
-                return True   # non-407 error from destination = still routable
+                return True
         except Exception:
             continue
     return False
 
-
 async def check_bale_reachable(proxy_url: str,
                                timeout: float = BALE_TCP_TIMEOUT) -> bool:
-    """
-    Probe Bale messaging infrastructure through a proxy.
-
-    Uses aiohttp with the proxy URL to make an HTTP HEAD request to each
-    Bale endpoint.  A response of any kind (including 4xx/5xx) confirms
-    that the proxy can route packets to Iranian-hosted infrastructure.
-
-    Why this works as a geo-routing signal:
-      - Bale.ai is hosted on Iranian infrastructure and reachable from the EU
-        (confirmed: Germany) but blocked from North American IP ranges.
-      - GitHub Actions runners use Azure IPs (North America) which cannot
-        reach Bale, so if a proxy passes this check it genuinely has a
-        routing path unavailable to the runner itself.
-    """
     return await _probe_endpoints(BALE_TEST_ENDPOINTS, proxy_url, timeout)
-
 
 async def check_rubika_reachable(proxy_url: str,
                                   timeout: float = BALE_TCP_TIMEOUT) -> bool:
-    """
-    Probe Rubika (web.rubika.ir) through a proxy.
-    Rubika is self-hosted on Iranian infrastructure; same EU-reachable /
-    NA-blocked asymmetry as Bale — provides a second independent routing signal.
-    """
     return await _probe_endpoints(RUBIKA_TEST_ENDPOINTS, proxy_url, timeout)
-
 
 async def check_splus_reachable(proxy_url: str,
                                  timeout: float = BALE_TCP_TIMEOUT) -> bool:
-    """
-    Probe Splus (web.splus.ir) through a proxy.
-    Splus is self-hosted on Iranian infrastructure; independent CDN path from
-    Bale and Rubika — third routing signal, reduces single-platform false positives.
-    """
     return await _probe_endpoints(SPLUS_TEST_ENDPOINTS, proxy_url, timeout)
 
-
 async def verify_proxy_http(proxy: str, timeout: int = HTTP_TIMEOUT) -> Optional[dict]:
-    """
-    Verify proxy by checking 2-of-3 geolocation sources.
-    Prevents false positives from accidental open ports on non-proxy services.
-    CDN anycast IPs (Cloudflare, Fastly, Akamai) are rejected immediately -
-    they always have ports open but are not proxies.
-    """
     ip, port_str = proxy.rsplit(":", 1)
     port = int(port_str)
 
-    # Reject CDN anycast IPs early - they flood results with false positives
     if is_cdn_ip(ip):
         return None
 
     proxy_url = f"http://{ip}:{port}"
 
-    # Randomise target order per proxy so concurrent workers don't all hammer
-    # ip-api.com first - it has a 45 req/min free-tier rate limit.
     targets = list(VERIFICATION_TARGETS)
     random.shuffle(targets)
 
@@ -895,7 +870,6 @@ async def verify_proxy_http(proxy: str, timeout: int = HTTP_TIMEOUT) -> Optional
             pass
         return False
 
-    # --- HTTP proxy ---
     confirmed = 0
     async with aiohttp.ClientSession() as session:
         checks = await asyncio.gather(*[
@@ -914,7 +888,6 @@ async def verify_proxy_http(proxy: str, timeout: int = HTTP_TIMEOUT) -> Optional
             "geo_score": confirmed,
         }
 
-    # --- SOCKS5 fallback ---
     try:
         import aiohttp_socks
         conn = aiohttp_socks.ProxyConnector.from_url(f"socks5://{ip}:{port}")
@@ -937,8 +910,6 @@ async def verify_proxy_http(proxy: str, timeout: int = HTTP_TIMEOUT) -> Optional
     except Exception:
         pass
 
-    # --- SOCKS4 fallback ---
-    # Some Iranian proxies advertise only SOCKS4 (no auth, IPv4 only).
     try:
         import aiohttp_socks
         conn4 = aiohttp_socks.ProxyConnector.from_url(f"socks4://{ip}:{port}")
@@ -961,10 +932,6 @@ async def verify_proxy_http(proxy: str, timeout: int = HTTP_TIMEOUT) -> Optional
     except Exception:
         pass
 
-    # --- Tier 2: EU->IR bridge — exit geo ≠ IR but Iranian infra is reachable ---
-    # Run all three probes concurrently (asyncio.gather) — zero added latency
-    # vs. the original single-Bale check.  Accept if ANY probe passes (1-of-3).
-    # Store iran_probe_score so downstream tools can rank 3/3 bridges first.
     bale_ok, rubika_ok, splus_ok = await asyncio.gather(
         check_bale_reachable(proxy_url),
         check_rubika_reachable(proxy_url),
@@ -973,8 +940,7 @@ async def verify_proxy_http(proxy: str, timeout: int = HTTP_TIMEOUT) -> Optional
     iran_probe_score = sum([bale_ok, rubika_ok, splus_ok])
 
     if iran_probe_score >= 1:
-        # Try to determine the actual exit country from whichever geo check passed.
-        exit_country = "EU"   # default label
+        exit_country = "EU"
         for url, key, _ in VERIFICATION_TARGETS:
             try:
                 async with aiohttp.ClientSession() as session:
@@ -990,14 +956,14 @@ async def verify_proxy_http(proxy: str, timeout: int = HTTP_TIMEOUT) -> Optional
         return {
             "proxy":            proxy,
             "working":          True,
-            "exit_verified":    False,            # exit not in IR
+            "exit_verified":    False,
             "protocol":         "http",
             "latency":          None,
-            "country":          exit_country,     # actual exit country (DE, NL, etc.)
+            "country":          exit_country,
             "geo_score":        confirmed,
             "iran_reachable":   True,
-            "iran_probe_score": iran_probe_score, # 1-3; higher = more confident bridge
-            "iran_probes_ok":   {                 # which platforms responded
+            "iran_probe_score": iran_probe_score,
+            "iran_probes_ok":   {
                 "bale":   bale_ok,
                 "rubika": rubika_ok,
                 "splus":  splus_ok,
@@ -1008,7 +974,6 @@ async def verify_proxy_http(proxy: str, timeout: int = HTTP_TIMEOUT) -> Optional
     return None
 
 async def scrape_public_proxies() -> List[str]:
-    """Scrape public proxy lists for additional candidates."""
     candidates: set = set()
     async with aiohttp.ClientSession() as session:
         for url in PROXY_SOURCES:
@@ -1023,18 +988,6 @@ async def scrape_public_proxies() -> List[str]:
     return list(candidates)
 
 async def fetch_european_bridge_prefixes() -> List[str]:
-    """
-    Return European bridge prefixes to scan for Iranian-operated proxy servers.
-
-    By default ONLY the hardcoded EUROPEAN_BRIDGE_PREFIXES list is used -
-    this is instant and avoids 14 sequential RIPE Stat API round-trips that
-    were the primary cause of the 60-minute scan timeout.
-
-    Set env var EU_FETCH_RIPE=1 to additionally fetch live prefixes from RIPE
-    Stat for each EU ASN.  This adds ~30s but gives broader coverage.
-    The result is always capped at EU_PREFIX_CAP (default 20) most-specific
-    prefixes (/24 > /22 > /16) to keep scan time bounded.
-    """
     EU_PREFIX_CAP   = int(os.environ.get("EU_PREFIX_CAP",   "20"))
     EU_FETCH_RIPE   = os.environ.get("EU_FETCH_RIPE", "").strip() == "1"
 
@@ -1059,8 +1012,6 @@ async def fetch_european_bridge_prefixes() -> List[str]:
 
     all_prefixes = list(set(all_prefixes))
 
-    # Cap to the most-specific prefixes - /24s finish masscan in <1s each and
-    # host the highest density of Iranian-operated VPS servers in these ranges.
     try:
         all_prefixes = sorted(
             all_prefixes,
@@ -1076,10 +1027,8 @@ async def fetch_european_bridge_prefixes() -> List[str]:
 
 async def run_proxy_scanner(asn_db: dict, use_masscan: bool = False,
                              europe_bridge: bool = False) -> List[dict]:
-    """Main proxy scanning routine."""
     all_candidates: List[str] = []
 
-    # Gather prefixes from ASN DB
     prefixes: List[str] = []
     for asn, entry in asn_db.items():
         if entry.get("confidence", 1) < MIN_CONFIDENCE:
@@ -1091,7 +1040,6 @@ async def run_proxy_scanner(asn_db: dict, use_masscan: bool = False,
     prefixes = list(set(prefixes))
     print(f"Scanning {len(prefixes)} Iranian prefixes for open proxy ports ...")
 
-    # Optionally extend with European bridge prefixes
     eu_prefixes: List[str] = []
     if europe_bridge:
         eu_prefixes = await fetch_european_bridge_prefixes()
@@ -1101,18 +1049,12 @@ async def run_proxy_scanner(asn_db: dict, use_masscan: bool = False,
         all_scan_prefixes = prefixes
 
     if use_masscan and shutil.which("masscan"):
-        # FIX: Run masscan concurrently across prefixes (was a blocking serial loop).
-        # Semaphore of 6 limits concurrent processes to avoid exhausting RAM/sockets
-        # while still achieving ~6?? speedup over the original sequential approach.
         mscan_sem = asyncio.Semaphore(int(os.environ.get("MASSCAN_PARALLEL", "6")))
 
         async def _masscan_one(pfx: str) -> List[str]:
             async with mscan_sem:
                 return await scan_prefix_with_masscan(pfx)
 
-        # EU prefixes: use async TCP sampling with 20 IPs per prefix instead
-        # of masscan - masscan on large Hetzner/OVH blocks is the main time sink,
-        # and 20 stratified samples is enough to find Iranian-operated servers.
         if eu_prefixes:
             ir_mscan_tasks  = [_masscan_one(p) for p in prefixes]
             eu_sample_tasks = [scan_prefix_async(p, max_samples=20) for p in eu_prefixes]
@@ -1152,13 +1094,10 @@ async def run_proxy_scanner(asn_db: dict, use_masscan: bool = False,
     all_candidates = list(set(all_candidates))
     print(f"Found {len(all_candidates)} candidate proxy endpoints from prefix scan.")
 
-    # Add public proxy candidates
     public_candidates = await scrape_public_proxies()
     print(f"Found {len(public_candidates)} public proxy candidates.")
     all_candidates = list(set(all_candidates + public_candidates))
 
-    # FIX: Semaphore raised from 50 -> 100 and HTTP_TIMEOUT lowered from 10 -> 7 s
-    # so the verification phase drains faster and stays within the job budget.
     verified: List[dict] = []
     sem = asyncio.Semaphore(100)
 
@@ -1239,10 +1178,6 @@ def print_summary(merged: dict):
 # ---------- Armenia-bridge ingestion ----------
 
 def _parse_v2ray_uri_to_proxy_record(uri: str) -> Optional[dict]:
-    """
-    Extract a minimal proxy record from a V2Ray URI string
-    (VMess/VLESS/SS/Trojan/Hysteria2).  Returns None if unparseable.
-    """
     import base64 as _b64
     uri = uri.strip()
     scheme = uri.split("://")[0].lower()
@@ -1299,10 +1234,6 @@ def _parse_v2ray_uri_to_proxy_record(uri: str) -> Optional[dict]:
 
 
 def _load_proxies_from_txt(path: str, source_label: str) -> List[dict]:
-    """
-    Read a plain-text file of IP:port proxies (one per line, # comments OK).
-    Each entry becomes a minimal proxy record tagged as an Armenia bridge.
-    """
     results: List[dict] = []
     try:
         with open(path) as f:
@@ -1310,11 +1241,7 @@ def _load_proxies_from_txt(path: str, source_label: str) -> List[dict]:
                 line = raw.strip()
                 if not line or line.startswith("#"):
                     continue
-                # Lines can be:
-                #   ip:port
-                #   PROTOCOL   ip:port   999ms        (check_proxies_armenia format)
                 parts = line.split()
-                # Find the token matching ip:port
                 ip_port = None
                 for token in parts:
                     m = re.match(r"^(\d{1,3}(?:\.\d{1,3}){3}):(\d{2,5})$", token)
@@ -1343,10 +1270,6 @@ def _load_proxies_from_txt(path: str, source_label: str) -> List[dict]:
 
 
 def _load_v2ray_uris_from_txt(path: str, source_label: str) -> List[dict]:
-    """
-    Read a plain-text file of V2Ray URIs (one per line, # comments OK).
-    Returns parsed proxy records.
-    """
     results: List[dict] = []
     try:
         with open(path) as f:
@@ -1363,37 +1286,11 @@ def _load_v2ray_uris_from_txt(path: str, source_label: str) -> List[dict]:
 
 
 def load_armenia_bridge_proxies() -> List[dict]:
-    """
-    Load working Armenian proxies / V2Ray configs from the committed output
-    files of the two external repos:
-
-      armenia-proxy-checker   -> working_armenia_proxies.txt / .json
-                                 armenia_iran_bridge_proxies.txt / .json
-      armenia_v2ray_checker   -> working_armenia_configs.txt / .json
-                                 armenia_iran_bridge_configs.txt / .json
-
-    Paths are resolved via environment variables so the caller can point at
-    any directory layout (local checkout, CI workspace subdir, etc.):
-
-      ARMENIA_PROXY_DIR   - root of the armenia-proxy-checker checkout
-                            default: "armenia-proxy-checker"
-      ARMENIA_V2RAY_DIR   - root of the armenia_v2ray_checker checkout
-                            default: "armenia_v2ray_checker"
-
-    When a *_bridge_* file is present it is preferred (already filtered to
-    entries that passed the Iran-bridge test).  When it is absent the plain
-    working_* file is used and ALL entries are treated as potential bridges
-    (appropriate when running on GitHub-hosted runners where the bridge test
-    cannot be performed directly).
-
-    Returns a deduplicated list of proxy dicts compatible with the
-    working_iran_proxies output format.
-    """
     proxy_dir  = os.environ.get("ARMENIA_PROXY_DIR",  "armenia-proxy-checker")
     v2ray_dir  = os.environ.get("ARMENIA_V2RAY_DIR",  "armenia_v2ray_checker")
 
     results:   List[dict] = []
-    seen_keys: set        = set()   # deduplicate on (proxy, protocol)
+    seen_keys: set        = set()
 
     def dedup_add(records: List[dict]) -> None:
         for r in records:
@@ -1402,10 +1299,8 @@ def load_armenia_bridge_proxies() -> List[dict]:
                 seen_keys.add(key)
                 results.append(r)
 
-    # -- armenia-proxy-checker outputs --------------------------------------
-    # Prefer the bridge-specific file; fall back to the full working list.
-    bridge_proxy_json = os.path.join(proxy_dir, "armenia_iran_bridge_proxies.json")
-    bridge_proxy_txt  = os.path.join(proxy_dir, "armenia_iran_bridge_proxies.txt")
+    bridge_proxy_json  = os.path.join(proxy_dir, "armenia_iran_bridge_proxies.json")
+    bridge_proxy_txt   = os.path.join(proxy_dir, "armenia_iran_bridge_proxies.txt")
     working_proxy_json = os.path.join(proxy_dir, "working_armenia_proxies.json")
     working_proxy_txt  = os.path.join(proxy_dir, "working_armenia_proxies.txt")
 
@@ -1420,8 +1315,6 @@ def load_armenia_bridge_proxies() -> List[dict]:
             try:
                 with open(jpath) as f:
                     data = json.load(f)
-                # The JSON can have a "proxies" key (bridge format)
-                # or a "verified" key (full working format).
                 entries = data.get("proxies") or data.get("verified") or []
                 recs: List[dict] = []
                 for p in entries:
@@ -1455,7 +1348,6 @@ def load_armenia_bridge_proxies() -> List[dict]:
     if not loaded_proxy:
         print(f"  Armenia-bridge: no proxy files found under '{proxy_dir}'")
 
-    # -- armenia_v2ray_checker outputs --------------------------------------
     bridge_cfg_json  = os.path.join(v2ray_dir, "armenia_iran_bridge_configs.json")
     bridge_cfg_txt   = os.path.join(v2ray_dir, "armenia_iran_bridge_configs.txt")
     working_cfg_json = os.path.join(v2ray_dir, "working_armenia_configs.json")
@@ -1472,7 +1364,6 @@ def load_armenia_bridge_proxies() -> List[dict]:
             try:
                 with open(jpath) as f:
                     data = json.load(f)
-                # Both bridge and working JSON have a "configs" key with uri field
                 entries = data.get("configs") or data.get("outbounds") or []
                 recs = []
                 for entry in entries:
@@ -1483,7 +1374,6 @@ def load_armenia_bridge_proxies() -> List[dict]:
                             rec["source"] = label
                             recs.append(rec)
                     else:
-                        # Hiddify outbound format: server + server_port
                         srv  = entry.get("server", "")
                         port = entry.get("server_port", 0)
                         if srv and port:
@@ -1521,59 +1411,48 @@ def load_armenia_bridge_proxies() -> List[dict]:
 # ---------- Main orchestration ----------
 
 async def main():
-    parser = argparse.ArgumentParser(description="Iran Network Scanner v2.1")
+    parser = argparse.ArgumentParser(description="Iran Network Scanner v2.2")
     parser.add_argument("--candidates",       help="File of IPs for reverse lookup")
     parser.add_argument("--bgp-only",         action="store_true")
     parser.add_argument("--atlas-only",       action="store_true")
     parser.add_argument("--reverse-only",     action="store_true")
     parser.add_argument("--proxy-only",       action="store_true")
     parser.add_argument("--armenia-bridge",   action="store_true",
-                        help="Ingest Armenia-bridge proxies/configs and merge "
-                             "them into the working proxy output")
+                        help="Ingest Armenia-bridge proxies/configs")
     parser.add_argument("--europe-bridge",    action="store_true",
-                        help="Also scan European hosting ASNs (Hetzner/Contabo/OVH) "
-                             "and verify proxies via Bale/Rubika/Splus reachability "
-                             "(EU->IR bridges, 1-of-3 probe vote)")
+                        help="Scan European hosting ASNs for EU->IR bridges")
     parser.add_argument("--use-masscan",      action="store_true",
                         help="Use masscan for faster port scanning")
+    parser.add_argument("--sni-fronting",     action="store_true",
+                        help="Discover working Cloudflare SNI-fronting pairs "
+                             "and emit working_sni_fronting.json")
     parser.add_argument("--output",           default="merged_routable_asns.json")
     parser.add_argument("--save-intermediates", action="store_true")
     args = parser.parse_args()
 
     atlas_res = bgp_res = reverse_res = proxy_res = armenia_bridge_res = None
 
-    if not args.reverse_only and not args.proxy_only:
-        # -- Phase 1: collect ASNs from all sources --------------------------
-
-        # 1a. Seed + DNS
+    if not args.reverse_only and not args.proxy_only and not args.sni_fronting:
         dns_asns = await discover_asns_via_dns()
         working_asns = set(SEED_ASNS) | set(dns_asns)
 
-        # 1b. RIPE NCC delegated stats (direct, comprehensive)
         delegated_asns, delegated_prefixes = await fetch_ripe_delegated()
         working_asns.update(delegated_asns)
 
-        # 1c. Hurricane Electric
         he_asns = await fetch_he_asns()
         working_asns.update(he_asns)
 
-        # 1d. Cloudflare Radar
         cf_asns = await fetch_cloudflare_radar_asns()
         working_asns.update(cf_asns)
 
-        # 1e. Shadowserver direct prefixes (stored for scanning)
         shadowserver_prefixes = await fetch_shadowserver_prefixes()
 
-        # 1f. BGP neighbour expansion (two-hop)
         first_hop = await expand_via_neighbours(list(SEED_ASNS), min_shared=2)
         working_asns.update(first_hop)
-        # second_hop = await expand_two_hop(list(SEED_ASNS), first_hop, min_shared=1)
-        # working_asns.update(second_hop)
 
         print(f"\nTotal candidate ASNs before prefix fetch: {len(working_asns)}")
 
-        # -- Phase 2: fetch prefixes concurrently --
-        sem = asyncio.Semaphore(20)  # max 20 parallel RIPE Stat requests
+        sem = asyncio.Semaphore(20)
 
         async def fetch_one(asn):
             async with sem:
@@ -1595,10 +1474,9 @@ async def main():
         print(f"Fetching prefixes for {len(working_asns)} ASNs (parallel) ...")
         bgp_list = await asyncio.gather(*[fetch_one(asn) for asn in working_asns])
         bgp_list = list(bgp_list)
-        # Inject Shadowserver prefixes as a synthetic "extra" entry
         if shadowserver_prefixes:
             bgp_list.append({
-                "asn": 0,  # sentinel for direct prefixes
+                "asn": 0,
                 "routable": True,
                 "routable_prefixes": shadowserver_prefixes,
                 "routable_prefixes_v6": [],
@@ -1613,20 +1491,17 @@ async def main():
 
         bgp_res = bgp_list
 
-        # -- Phase 3: optional Atlas -----------------------------------------
         if not args.bgp_only and not args.reverse_only and not args.proxy_only:
             if RIPE_ATLAS_API_KEY:
                 atlas_res = await run_atlas(list(working_asns)[:20], RIPE_ATLAS_API_KEY)
             else:
                 print("RIPE_ATLAS_API_KEY not set, skipping Atlas")
 
-    # -- Reverse lookup ------------------------------------------------------
     if args.reverse_only and args.candidates:
         with open(args.candidates) as f:
             ips = [line.strip() for line in f if line.strip()]
         reverse_res = await run_reverse(ips, IPINFO_TOKEN)
 
-    # -- Proxy scan ----------------------------------------------------------
     if args.proxy_only:
         asn_db: dict = {}
         if bgp_res:
@@ -1644,9 +1519,6 @@ async def main():
             except Exception:
                 asn_db = {}
 
-        # FIX: Hard 50-minute wall-clock cap so the job always has time to
-        # commit results even if the scan hasn't fully finished.  The GitHub
-        # Actions timeout is 60 min; 50 min leaves 10 min for git push + cleanup.
         PROXY_SCAN_TIMEOUT = int(os.environ.get("PROXY_SCAN_TIMEOUT_SECS", str(50 * 60)))
         try:
             proxy_res = await asyncio.wait_for(
@@ -1659,19 +1531,25 @@ async def main():
                   f"wall-clock limit - saving partial results and continuing.")
             proxy_res = []
 
-    # -- Armenia-bridge ingestion --------------------------------------------
+    # -- SNI-fronting discovery ----------------------------------------------
+    if args.sni_fronting:
+        print("\nRunning SNI-fronting pair discovery ...")
+        await discover_sni_fronting_pairs()
+        # SNI-fronting is a standalone job; skip the rest of main() if that's
+        # all that was requested (no --proxy-only, no --bgp-only, etc.)
+        if not args.proxy_only and not args.bgp_only:
+            return
+
     if args.armenia_bridge:
         print("\nIngesting Armenia->Iran bridge proxies ...")
         armenia_bridge_res = load_armenia_bridge_proxies()
 
-    # -- Merge & save --------------------------------------------------------
     merged = merge_results(atlas_res, bgp_res, reverse_res)
 
     with open(args.output, "w") as f:
         json.dump(merged, f, indent=2)
 
     if proxy_res:
-        # Merge Armenia-bridge entries into the proxy output
         if armenia_bridge_res:
             existing = {p["proxy"] for p in proxy_res}
             new_bridges = [b for b in armenia_bridge_res if b["proxy"] not in existing]
@@ -1679,16 +1557,14 @@ async def main():
             print(f"Added {len(new_bridges)} Armenia-bridge proxies to output "
                   f"({len(proxy_res)} total).")
 
-        # Split into Iranian-exit and EU->IR bridge proxies for separate outputs
         ir_proxies  = [p for p in proxy_res if p.get("country") == "IR"]
         eu_bridges  = [p for p in proxy_res
                        if p.get("bridge_type") == "EU->IR" or
                           (p.get("iran_reachable") and p.get("country") != "IR")]
         am_bridges  = [p for p in proxy_res if p.get("iran_bridge") and
                        p.get("country") == "AM"]
-        all_usable  = proxy_res   # everything - IR exits + all bridge types
+        all_usable  = proxy_res
 
-        # Sort EU bridges by probe score descending (3/3 most confident first)
         eu_bridges.sort(key=lambda p: p.get("iran_probe_score", 0), reverse=True)
 
         print(f"Output breakdown: {len(ir_proxies)} IR-exit | "
@@ -1699,8 +1575,6 @@ async def main():
             for p in all_usable:
                 f.write(p["proxy"] + "\n")
 
-        # Stamp every proxy entry with the UTC verification time so downstream
-        # tools (e.g. the R tester) can warn when proxies are stale.
         scan_ts = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
         for p in all_usable:
             p.setdefault("scan_timestamp", scan_ts)
@@ -1708,7 +1582,6 @@ async def main():
         with open("working_iran_proxies.json", "w") as f:
             json.dump(all_usable, f, indent=2)
 
-        # Hiddify outbound config - prefer IR-exit proxies, pad with bridges
         hiddify_pool = (ir_proxies + eu_bridges + am_bridges)[:10]
         hiddify = {
             "outbounds": [{
