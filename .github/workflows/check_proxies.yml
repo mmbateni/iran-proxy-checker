@@ -237,14 +237,18 @@ jobs:
             working_iran_proxies.txt
             working_iran_proxies.json
             hiddify_iran_proxies.json
+            working_v2ray_configs.txt
+            working_v2ray_configs.json
 
       - name: Commit and push proxy results
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          [ -f working_iran_proxies.txt ]    && git add working_iran_proxies.txt    || true
-          [ -f working_iran_proxies.json ]   && git add working_iran_proxies.json   || true
-          [ -f hiddify_iran_proxies.json ]   && git add hiddify_iran_proxies.json   || true
+          [ -f working_iran_proxies.txt ]   && git add working_iran_proxies.txt   || true
+          [ -f working_iran_proxies.json ]  && git add working_iran_proxies.json  || true
+          [ -f hiddify_iran_proxies.json ]  && git add hiddify_iran_proxies.json  || true
+          [ -f working_v2ray_configs.txt ]  && git add working_v2ray_configs.txt  || true
+          [ -f working_v2ray_configs.json ] && git add working_v2ray_configs.json || true
           git diff --cached --quiet || git commit -m "chore: update proxies $(date -u +'%Y-%m-%d')"
           git stash --include-untracked || true
           git pull --rebase origin main
