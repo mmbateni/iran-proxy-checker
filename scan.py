@@ -197,6 +197,66 @@ PROXY_SOURCES = [
     "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies.txt",
 ]
 
+# V2Ray URI aggregator sources (VMess/VLESS/Trojan/SS/Hysteria2 config lines).
+# These repos use bots that scrape Telegram channels and public feeds every
+# 10-60 minutes, then test and categorise nodes by protocol and geo-IP.
+# Unlike PROXY_SOURCES (plain ip:port), these require URI parsing via
+# _parse_v2ray_uri_to_proxy_record() before host:port can be extracted.
+# NOTE: Repo paths and branch names change occasionally; update if 404s appear.
+V2RAY_SOURCES: List[Tuple[str, str]] = [
+    # (url, label)
+    # -- SoliSpirit/v2ray-configs ---------------------------------------------
+    # Updates every ~15 min. Splits into per-protocol files; the Countries/
+    # subfolder has IR-only configs but the full protocol files are richer.
+    (
+        "https://raw.githubusercontent.com/SoliSpirit/v2ray-configs/main/"
+        "Splitted-By-Protocol/vmess.txt",
+        "SoliSpirit/vmess",
+    ),
+    (
+        "https://raw.githubusercontent.com/SoliSpirit/v2ray-configs/main/"
+        "Splitted-By-Protocol/vless.txt",
+        "SoliSpirit/vless",
+    ),
+    (
+        "https://raw.githubusercontent.com/SoliSpirit/v2ray-configs/main/"
+        "Splitted-By-Protocol/trojan.txt",
+        "SoliSpirit/trojan",
+    ),
+    (
+        "https://raw.githubusercontent.com/SoliSpirit/v2ray-configs/main/"
+        "Splitted-By-Protocol/ss.txt",
+        "SoliSpirit/ss",
+    ),
+    # -- mahdibland/V2RayAggregator -------------------------------------------
+    # Aggregates from hundreds of public Telegram channels; merged sub file
+    # contains mixed protocols, all tested for latency.
+    (
+        "https://raw.githubusercontent.com/mahdibland/V2RayAggregator/master/"
+        "sub/sub_merge.txt",
+        "mahdibland/sub_merge",
+    ),
+    (
+        "https://raw.githubusercontent.com/mahdibland/V2RayAggregator/master/"
+        "Eternity",
+        "mahdibland/Eternity",
+    ),
+    # -- Epodonios/bulk-xray-configs ------------------------------------------
+    # Country-folder sorted; All_Configs_Sub.txt is the merged subscription.
+    (
+        "https://raw.githubusercontent.com/Epodonios/bulk-xray-configs/main/"
+        "Configs/All_Configs_Sub.txt",
+        "Epodonios/All_Configs",
+    ),
+    # -- Surfboardv2ray/Proxy-sorter ------------------------------------------
+    # Uses geo-IP sorting; output is a subscription file of tested nodes.
+    (
+        "https://raw.githubusercontent.com/Surfboardv2ray/Proxy-sorter/main/"
+        "python/sorted_proxies.txt",
+        "Surfboardv2ray/sorted",
+    ),
+]
+
 VERIFICATION_TARGETS = [
     ("http://ip-api.com/json/?fields=status,countryCode", "countryCode", "IR"),
     ("http://ipwho.is/",                                  "country_code", "IR"),
@@ -987,6 +1047,122 @@ async def scrape_public_proxies() -> List[str]:
                 continue
     return list(candidates)
 
+async def scrape_v2ray_sources() -> Tuple[List[str], List[dict]]:
+    """
+    Fetch V2Ray URI configs from the GitHub aggregator repos in V2RAY_SOURCES.
+
+    Each file is a text feed containing lines like:
+        vmess://BASE64...
+        vless://UUID@host:port?...
+        trojan://pass@host:port#name
+        ss://BASE64@host:port
+        hysteria2://pass@host:port
+
+    Processing pipeline:
+      1. Fetch each URL (non-fatal: skips on 404/timeout).
+      2. Extract all V2Ray URIs via regex.
+      3. Also harvest plain ip:port strings (some repos mix formats).
+      4. Parse each URI with _parse_v2ray_uri_to_proxy_record().
+      5. TCP-connect check every parsed host:port to filter dead servers
+         before adding to results (uses 2 * TCP_TIMEOUT per host).
+
+    Returns:
+        plain_proxies  - ip:port strings from HTTP/SOCKS entries; these go
+                         straight into the verify_proxy_http() pipeline.
+        v2ray_records  - parsed dicts for VMess/VLESS/Trojan/SS/Hysteria2;
+                         TCP-alive only; protocol-level verification requires
+                         a V2Ray client and is out of scope here.
+                         Saved separately as working_v2ray_configs.json/.txt.
+    """
+    V2RAY_URI_RE = re.compile(
+        r'(?:vmess|vless|trojan|ss|hysteria2|hy2|tuic)://[^\s<>"\'\\]+',
+        re.IGNORECASE,
+    )
+
+    plain_set:  set        = set()
+    v2ray_list: List[dict] = []
+    seen_v2ray: set        = set()   # dedup on (host:port, protocol)
+
+    async with aiohttp.ClientSession() as session:
+        for url, label in V2RAY_SOURCES:
+            try:
+                async with session.get(url, timeout=25) as resp:
+                    if resp.status != 200:
+                        print(f"  V2Ray [{label}]: HTTP {resp.status}, skipping")
+                        continue
+                    text = await resp.text(errors="replace")
+            except Exception as e:
+                print(f"  V2Ray [{label}]: fetch error: {e}")
+                continue
+
+            # Also harvest plain ip:port (some repos mix URI + plain formats)
+            plain_hits = re.findall(r'\b(?:\d{1,3}\.){3}\d{1,3}:\d{2,5}\b', text)
+            plain_set.update(plain_hits)
+
+            n_parsed = 0
+            for m in V2RAY_URI_RE.finditer(text):
+                uri = m.group(0).rstrip(".,;)")   # strip stray trailing punctuation
+                rec = _parse_v2ray_uri_to_proxy_record(uri)
+                if not rec:
+                    continue
+                key = (rec["proxy"], rec["protocol"])
+                if key in seen_v2ray:
+                    continue
+                seen_v2ray.add(key)
+                # Overwrite Armenia-specific defaults set by the parser
+                rec["country"]     = "?"
+                rec["iran_bridge"] = False
+                rec["source"]      = label
+                rec["source_type"] = "v2ray-aggregator"
+                rec["config_uri"]  = uri
+                v2ray_list.append(rec)
+                n_parsed += 1
+
+            print(f"  V2Ray [{label}]: {n_parsed} URIs parsed, "
+                  f"{len(plain_hits)} plain ip:port")
+
+    print(f"  V2Ray sources total: {len(v2ray_list)} unique configs "
+          f"(before TCP check), {len(plain_set)} plain ip:port")
+
+    # --- TCP-connect filter --------------------------------------------------
+    # Filters dead servers cheaply before handing results to the caller.
+    # Uses 2x TCP_TIMEOUT to give hosted (non-IR) servers a fair chance.
+    # Runs at up to 500 concurrent connections (same budget as verify semaphore).
+
+    async def _tcp_check(rec: dict) -> Optional[dict]:
+        proxy_str = rec["proxy"]
+        parts = proxy_str.rsplit(":", 1)
+        if len(parts) != 2:
+            return None
+        host, port_str = parts
+        try:
+            port = int(port_str)
+        except ValueError:
+            return None
+        if not (1 <= port <= 65535):
+            return None
+        # Skip bogon check for hostnames; is_bogon() only handles IPv4 literals.
+        if re.match(r'^\d{1,3}(?:\.\d{1,3}){3}$', host) and is_bogon(host):
+            return None
+        if await tcp_connect(host, port, timeout=TCP_TIMEOUT * 2):
+            rec["tcp_reachable"] = True
+            return rec
+        return None
+
+    tcp_sem = asyncio.Semaphore(500)
+
+    async def _guarded_check(rec: dict) -> Optional[dict]:
+        async with tcp_sem:
+            return await _tcp_check(rec)
+
+    print(f"  TCP-checking {len(v2ray_list)} V2Ray endpoints ...")
+    tcp_results = await asyncio.gather(*[_guarded_check(r) for r in v2ray_list])
+    live_v2ray  = [r for r in tcp_results if r is not None]
+
+    print(f"  V2Ray TCP-alive: {len(live_v2ray)}/{len(v2ray_list)} reachable")
+    return list(plain_set), live_v2ray
+
+
 async def fetch_european_bridge_prefixes() -> List[str]:
     EU_PREFIX_CAP   = int(os.environ.get("EU_PREFIX_CAP",   "20"))
     EU_FETCH_RIPE   = os.environ.get("EU_FETCH_RIPE", "").strip() == "1"
@@ -1026,7 +1202,13 @@ async def fetch_european_bridge_prefixes() -> List[str]:
 
 
 async def run_proxy_scanner(asn_db: dict, use_masscan: bool = False,
-                             europe_bridge: bool = False) -> List[dict]:
+                             europe_bridge: bool = False) -> Tuple[List[dict], List[dict]]:
+    """
+    Returns (verified_proxies, v2ray_aggregator_records).
+    verified_proxies      - HTTP/SOCKS proxies that passed geo/Bale/Rubika/Splus checks.
+    v2ray_aggregator_records - VMess/VLESS/Trojan/SS configs from V2RAY_SOURCES that
+                               are TCP-reachable; not geo-verified (needs V2Ray client).
+    """
     all_candidates: List[str] = []
 
     prefixes: List[str] = []
@@ -1094,9 +1276,19 @@ async def run_proxy_scanner(asn_db: dict, use_masscan: bool = False,
     all_candidates = list(set(all_candidates))
     print(f"Found {len(all_candidates)} candidate proxy endpoints from prefix scan.")
 
+    # Add generic public proxy candidates (plain ip:port lists)
     public_candidates = await scrape_public_proxies()
     print(f"Found {len(public_candidates)} public proxy candidates.")
     all_candidates = list(set(all_candidates + public_candidates))
+
+    # Add V2Ray aggregator sources (VMess/VLESS/Trojan/SS/Hysteria2 URI feeds).
+    # plain_v2ray - ip:port strings mixed into those feeds -> join verify pipeline.
+    # v2ray_recs  - TCP-checked V2Ray protocol records     -> returned separately.
+    print("\nFetching V2Ray aggregator sources ...")
+    plain_v2ray, v2ray_recs = await scrape_v2ray_sources()
+    if plain_v2ray:
+        print(f"  Adding {len(plain_v2ray)} plain ip:port from V2Ray feeds to candidates.")
+        all_candidates = list(set(all_candidates + plain_v2ray))
 
     verified: List[dict] = []
     sem = asyncio.Semaphore(100)
@@ -1108,7 +1300,9 @@ async def run_proxy_scanner(asn_db: dict, use_masscan: bool = False,
     results = await asyncio.gather(*[verify_one(p) for p in all_candidates])
     verified = [r for r in results if r]
     print(f"Verified {len(verified)} working Iranian proxies.")
-    return verified
+    print(f"V2Ray aggregator: {len(v2ray_recs)} TCP-alive configs "
+          f"(saved to working_v2ray_configs.json/.txt).")
+    return verified, v2ray_recs
 
 # ---------- Merging ----------
 
@@ -1431,6 +1625,7 @@ async def main():
     args = parser.parse_args()
 
     atlas_res = bgp_res = reverse_res = proxy_res = armenia_bridge_res = None
+    v2ray_agg_res: List[dict] = []   # TCP-checked V2Ray aggregator configs
 
     if not args.reverse_only and not args.proxy_only and not args.sni_fronting:
         dns_asns = await discover_asns_via_dns()
@@ -1521,15 +1716,16 @@ async def main():
 
         PROXY_SCAN_TIMEOUT = int(os.environ.get("PROXY_SCAN_TIMEOUT_SECS", str(50 * 60)))
         try:
-            proxy_res = await asyncio.wait_for(
+            _scan_result = await asyncio.wait_for(
                 run_proxy_scanner(asn_db, use_masscan=args.use_masscan,
                                   europe_bridge=args.europe_bridge),
                 timeout=PROXY_SCAN_TIMEOUT,
             )
+            proxy_res, v2ray_agg_res = _scan_result
         except asyncio.TimeoutError:
             print(f"WARNING: proxy scan hit {PROXY_SCAN_TIMEOUT // 60}-minute "
                   f"wall-clock limit - saving partial results and continuing.")
-            proxy_res = []
+            proxy_res, v2ray_agg_res = [], []
 
     # -- SNI-fronting discovery ----------------------------------------------
     if args.sni_fronting:
@@ -1596,6 +1792,36 @@ async def main():
         }
         with open("hiddify_iran_proxies.json", "w") as f:
             json.dump(hiddify, f, indent=2)
+
+    # -- Save V2Ray aggregator configs ----------------------------------------
+    # These are VMess/VLESS/Trojan/SS/Hysteria2 configs from the GitHub
+    # aggregator repos that passed a TCP-connect check.  They are NOT
+    # geo-verified — import them into a V2Ray/Xray client (v2rayNG, Hiddify,
+    # Shadowrocket) which will perform the actual protocol handshake.
+    if v2ray_agg_res:
+        scan_ts = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+        for r in v2ray_agg_res:
+            r.setdefault("scan_timestamp", scan_ts)
+
+        # Plain URI list for direct subscription import into any V2Ray client
+        with open("working_v2ray_configs.txt", "w") as f:
+            for r in v2ray_agg_res:
+                uri = r.get("config_uri", "")
+                if uri:
+                    f.write(uri + "\n")
+
+        with open("working_v2ray_configs.json", "w") as f:
+            json.dump(v2ray_agg_res, f, indent=2)
+
+        # Protocol breakdown for the log
+        proto_counts: Counter = Counter(r.get("protocol", "?") for r in v2ray_agg_res)
+        source_counts: Counter = Counter(r.get("source", "?") for r in v2ray_agg_res)
+        print(f"\nV2Ray aggregator configs saved ({len(v2ray_agg_res)} total):")
+        for proto, n in proto_counts.most_common():
+            print(f"  {proto:12s} {n}")
+        print("  Sources:")
+        for src, n in source_counts.most_common():
+            print(f"    {src:40s} {n}")
 
     print_summary(merged)
 
