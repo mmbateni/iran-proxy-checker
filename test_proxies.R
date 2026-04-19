@@ -19,14 +19,17 @@ suppressPackageStartupMessages({
   library(jsonlite)
   library(parallel)
 })
+
 `%||%` <- function(a, b) if (!is.null(a) && length(a) > 0L) a else b
 
-# -- 1 Edit these when running interactively in RStudio ------------------------
+#-- 1 Edit these when running interactively in RStudio ------------------------
 INPUT_FILE <- "D:/IR_proxy_testing/working_iran_proxies.json"
 WORKERS    <- 32L
 TIMEOUT    <- 5L
+
 # Ports that speak SOCKS5 rather than HTTP CONNECT.
 SOCKS5_PORTS <- c(1080L, 1081L, 4145L, 5678L, 9050L, 9150L, 10800L)
+
 # Warn if the proxy file is older than this many hours.
 STALE_WARN_HOURS <- 3L
 
@@ -36,12 +39,14 @@ BALE_ENDPOINTS <- c(
   "https://bale.ai/",
   "http://bale.ai/"
 )
+
 # Rubika endpoints
 RUBIKA_ENDPOINTS <- c(
   "https://web.rubika.ir/",
   "https://rubika.ir/",
   "http://rubika.ir/"
 )
+
 # Splus endpoints
 SPLUS_ENDPOINTS <- c(
   "https://web.splus.ir/",
@@ -60,6 +65,7 @@ SNI_FRONTING_PAIRS_DEFAULT <- list(
   list(connect_ip = "104.16.0.1",    fake_sni = "speed.cloudflare.com"),
   list(connect_ip = "104.24.0.1",    fake_sni = "developers.cloudflare.com")
 )
+
 # The real Iranian-infra host routed inside the Cloudflare-fronted tunnel.
 SNI_REAL_HOST <- "tapi.bale.ai"
 
@@ -81,13 +87,14 @@ IRAN_NEIGHBOR_CC <- c("AM", "AZ", "TR", "IQ", "AF", "TM", "PK")
 IRAN_REGIONAL_CC <- c("RU", "DE", "NL", "FI", "SE", "AT", "CH",
                       "FR", "GB", "PL", "UA", "GE", "KZ")
 
-# -- IP range helpers ----------------------------------------------------------
+#-- IP range helpers ----------------------------------------------------------
 ip_to_int <- function(ip) {
   parts <- suppressWarnings(as.numeric(strsplit(ip, "\\.")[[1L]]))
   if (length(parts) != 4L || any(is.na(parts)) ||
       any(parts < 0) || any(parts > 255)) return(NA_real_)
   parts[1L] * 16777216 + parts[2L] * 65536 + parts[3L] * 256 + parts[4L]
 }
+
 is_in_cidr <- function(ip, network, prefix_len) {
   prefix_len <- as.numeric(prefix_len)
   if (is.na(prefix_len) || prefix_len < 0 || prefix_len > 32) return(FALSE)
@@ -98,6 +105,7 @@ is_in_cidr <- function(ip, network, prefix_len) {
   divisor <- 2 ^ host_bits
   floor(ip_i / divisor) == floor(net_i / divisor)
 }
+
 is_corporate_ip <- function(ip) {
   for (r in CORPORATE_RANGES) {
     if (is_in_cidr(ip, r[[1L]], r[[2L]])) return(TRUE)
@@ -105,7 +113,7 @@ is_corporate_ip <- function(ip) {
   FALSE
 }
 
-# -- SNI-fronting pair loader --------------------------------------------------
+#-- SNI-fronting pair loader --------------------------------------------------
 load_sni_pairs <- function(json_path = Sys.getenv("SNI_PAIRS_FILE",
                                                    "working_sni_fronting.json")) {
   if (!file.exists(json_path)) {
@@ -124,7 +132,7 @@ load_sni_pairs <- function(json_path = Sys.getenv("SNI_PAIRS_FILE",
   })
 }
 
-# -- Tier 0: SNI-fronting check ------------------------------------------------
+#-- Tier 0: SNI-fronting check ------------------------------------------------
 # ONLY called on proxies that already passed Tier 2 (bale-tunnel).
 # This avoids paying the full per-pair timeout cost (~30s) on the ~650 proxies
 # that will never pass, keeping total job runtime within the 60-minute budget.
@@ -135,8 +143,8 @@ check_sni_fronting <- function(proxy_url, timeout_secs,
                                real_host = SNI_REAL_HOST) {
   curl_bin <- if (.Platform$OS.type == "windows") "curl.exe" else "curl"
   for (pair in sni_pairs) {
-    connect_ip <- pair$connect_ip
-    fake_sni   <- pair$fake_sni
+    connect_ip  <- pair$connect_ip
+    fake_sni    <- pair$fake_sni
     resolve_arg <- sprintf("%s:443:%s", real_host, connect_ip)
     args <- c(
       "-s",
@@ -168,11 +176,11 @@ check_sni_fronting <- function(proxy_url, timeout_secs,
        status = NA_integer_)
 }
 
-# -- Pre-test priority heuristic -----------------------------------------------
+#-- Pre-test priority heuristic -----------------------------------------------
 pretest_score <- function(proxy_str) {
   parts <- strsplit(proxy_str, ":")[[1L]]
   if (length(parts) != 2L) return(0L)
-  ip <- parts[1L]
+  ip   <- parts[1L]
   port <- suppressWarnings(as.integer(parts[2L]))
   if (is.na(port)) return(0L)
   score <- 0L
@@ -203,33 +211,33 @@ pretest_score <- function(proxy_str) {
   score
 }
 
-# -- Post-test priority score --------------------------------------------------
+#-- Post-test priority score --------------------------------------------------
 priority_score <- function(tier, country, geo_score, proto, bale_status, https_status) {
   base <- switch(tier,
-                 "sni-fronting" = 1200L,
-                 "IR-exit" = 1000L,
-                 "bale-tunnel" = 800L,
+                 "sni-fronting"        = 1200L,
+                 "IR-exit"             = 1000L,
+                 "bale-tunnel"         = 800L,
                  "bale-tunnel-blocked" = 650L,
-                 "bale-bridge" = 400L,
-                 "fail" = 0L,
+                 "bale-bridge"         = 400L,
+                 "fail"                = 0L,
                  0L)
   base <- base + (geo_score %||% 0L) * 20L
   if (!is.na(proto) && proto %in% c("socks5", "socks4")) base <- base + 30L
-  if (!is.na(country) && country %in% IRAN_NEIGHBOR_CC) base <- base + 40L
-  if (!is.na(country) && country %in% IRAN_REGIONAL_CC) base <- base + 15L
-  if (!is.na(country) && country == "IR") base <- base + 100L
+  if (!is.na(country) && country %in% IRAN_NEIGHBOR_CC)  base <- base + 40L
+  if (!is.na(country) && country %in% IRAN_REGIONAL_CC)  base <- base + 15L
+  if (!is.na(country) && country == "IR")                 base <- base + 100L
   if (!is.na(bale_status)) {
-    if (bale_status == 200L) base <- base + 20L
-    else if (bale_status >= 300L && bale_status < 400L) base <- base + 10L
+    if (bale_status == 200L)                              base <- base + 20L
+    else if (bale_status >= 300L && bale_status < 400L)  base <- base + 10L
   }
   if (!is.na(https_status) && https_status > 0L) {
-    if (https_status == 200L) base <- base + 50L
+    if (https_status == 200L)                              base <- base + 50L
     else if (https_status >= 301L && https_status < 400L) base <- base + 30L
   }
   base
 }
 
-# -- 2 CLI overrides -----------------------------------------------------------
+#-- 2 CLI overrides -----------------------------------------------------------
 local({
   a <- commandArgs(trailingOnly = TRUE)
   if (length(a) == 0) return()
@@ -240,37 +248,37 @@ local({
   }
 })
 
-# -- 3 Geo-check targets -------------------------------------------------------
+#-- 3 Geo-check targets -------------------------------------------------------
 GEO_CHECKS <- list(
   list(url = "http://ip-api.com/json/?fields=status,countryCode", key = "countryCode"),
-  list(url = "http://ipwho.is/", key = "country_code"),
-  list(url = "http://ipapi.co/json/", key = "country_code")
+  list(url = "http://ipwho.is/",                                   key = "country_code"),
+  list(url = "http://ipapi.co/json/",                              key = "country_code")
 )
 
-# -- 4 Load proxies ------------------------------------------------------------
+#-- 4 Load proxies ------------------------------------------------------------
 load_proxies <- function(path) {
   if (!file.exists(path)) stop("File not found: ", path)
-  pat <- "^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}:\\d{2,5}$"
-  if (grepl("\\.json$", path, ignore.case = TRUE)) {
-    dat <- fromJSON(path, simplifyVector = FALSE)
-    items <- if (is.null(names(dat))) dat else unname(dat)
-    plist <- vapply(items, function(x) {
+  pat <- "^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d{2,5}$"
+  if (grepl("\.json$", path, ignore.case = TRUE)) {
+    dat    <- fromJSON(path, simplifyVector = FALSE)
+    items  <- if (is.null(names(dat))) dat else unname(dat)
+    plist  <- vapply(items, function(x) {
       v <- x[["proxy"]]; if (is.null(v) || !nzchar(v)) "" else as.character(v)
     }, character(1L))
   } else {
-    lines <- trimws(readLines(path, warn = FALSE))
-    lines <- lines[nzchar(lines) & !startsWith(lines, "#")]
-    plist <- character(0L)
+    lines  <- trimws(readLines(path, warn = FALSE))
+    lines  <- lines[nzchar(lines) & !startsWith(lines, "#")]
+    plist  <- character(0L)
     for (ln in lines) {
-      tok <- strsplit(ln, "\\s+")[[1L]]
-      m <- tok[grepl(pat, tok)]
+      tok  <- strsplit(ln, "\s+")[[1L]]
+      m    <- tok[grepl(pat, tok)]
       if (length(m)) plist <- c(plist, m[1L])
     }
   }
   unique(plist[grepl(pat, plist)])
 }
 
-# -- 5a Iranian infra reachability checks --------------------------------------
+#-- 5a Iranian infra reachability checks --------------------------------------
 INTERCEPTOR_DOMAINS <- c(
   "zscaler.net", "zscalerone.net", "zscalertwo.net",
   "zscalerthree.net", "zscalerbeta.net", "zscalergov.net",
@@ -287,6 +295,7 @@ INTERCEPTOR_DOMAINS <- c(
   "cloudflaregateway.com", "cloudflareclient.com",
   "captive-portal", "safe-browsing", "gateway.security"
 )
+
 is_interceptor_url <- function(url) {
   if (is.na(url) || !nzchar(url)) return(FALSE)
   host <- tryCatch({
@@ -318,14 +327,9 @@ check_iranian_infra <- function(proxy_url, timeout_secs, endpoints) {
       system2(curl_bin, args, stdout = TRUE, stderr = FALSE)
     ), silent = TRUE)
     if (inherits(raw, "try-error") || length(raw) == 0L) next
-    
-    # Guard against empty output after trimming
-    valid_lines <- raw[nzchar(trimws(raw))]
-    if (length(valid_lines) == 0L) next
-    
-    last_line <- trimws(tail(valid_lines, 1L))
-    tokens <- strsplit(last_line, " ", fixed = TRUE)[[1L]]
-    status <- suppressWarnings(as.integer(tokens[1L]))
+    last_line <- trimws(tail(raw[nzchar(trimws(raw))], 1L))
+    tokens    <- strsplit(last_line, " ", fixed = TRUE)[[1L]]
+    status    <- suppressWarnings(as.integer(tokens[1L]))
     final_url <- if (length(tokens) >= 2L) paste(tokens[-1L], collapse = " ") else ""
     if (is.na(status) || status <= 0L || status >= 600L) next
     if (status == 407L) next
@@ -342,9 +346,10 @@ check_iranian_infra <- function(proxy_url, timeout_secs, endpoints) {
 check_bale <- function(proxy_url, timeout_secs, bale_endpoints) {
   check_iranian_infra(proxy_url, timeout_secs, bale_endpoints)
 }
+
 BALE_HTTPS_TARGET <- "https://web.bale.ai/"
 
-# -- 5b HTTPS CONNECT tunnel check --------------------------------------------
+#-- 5b HTTPS CONNECT tunnel check --------------------------------------------
 check_bale_https <- function(proxy_url, timeout_secs) {
   curl_bin <- if (.Platform$OS.type == "windows") "curl.exe" else "curl"
   tmp_body <- tempfile(fileext = ".txt")
@@ -366,15 +371,9 @@ check_bale_https <- function(proxy_url, timeout_secs) {
   ), silent = TRUE)
   if (inherits(raw, "try-error") || length(raw) == 0L)
     return(list(tunnel = "none", https_status = 0L, https_url = ""))
-  
-  # Guard against empty output after trimming
-  valid_lines <- raw[nzchar(trimws(raw))]
-  if (length(valid_lines) == 0L)
-    return(list(tunnel = "none", https_status = 0L, https_url = ""))
-  
-  last_line <- trimws(tail(valid_lines, 1L))
-  tokens <- strsplit(last_line, " ", fixed = TRUE)[[1L]]
-  status <- suppressWarnings(as.integer(tokens[1L]))
+  last_line <- trimws(tail(raw[nzchar(trimws(raw))], 1L))
+  tokens    <- strsplit(last_line, " ", fixed = TRUE)[[1L]]
+  status    <- suppressWarnings(as.integer(tokens[1L]))
   final_url <- if (length(tokens) >= 2L) paste(tokens[-1L], collapse = " ") else ""
   if (is.na(status) || status == 0L)
     return(list(tunnel = "none", https_status = 0L, https_url = ""))
@@ -398,13 +397,16 @@ check_bale_https <- function(proxy_url, timeout_secs) {
   list(tunnel = "open-other", https_status = status, https_url = final_url)
 }
 
-# -- 5c Test one proxy ---------------------------------------------------------
+#-- 5c Test one proxy ---------------------------------------------------------
 # Tier order and performance rationale:
 # Geo check     -> fast, rules out 90% of candidates immediately
 # Tier 1        -> IR-exit confirmed, return early
 # Bale/infra    -> Tier 2-4 candidates identified
 # HTTPS tunnel  -> Tier 2 vs 4 split
 # Tier 0 (SNI)  -> ONLY on Tier 2 proxies (bale-tunnel)
+# Cost: ~1 SNI pair x timeout_secs for successes,
+# ~N pairs x timeout_secs for failures — but N is now
+# ~50 not ~700, so total added time is negligible.
 run_checks <- function(purl, timeout_secs, geo_checks) {
   h <- 0L; cc <- "?"
   for (chk in geo_checks) {
@@ -420,9 +422,8 @@ run_checks <- function(purl, timeout_secs, geo_checks) {
     raw <- try(suppressWarnings(system2("curl", args, stdout = TRUE, stderr = FALSE)),
                silent = TRUE)
     if (inherits(raw, "try-error") || length(raw) == 0L) next
-    body <- try(fromJSON(paste(raw, collapse = ""), simplifyVector = TRUE), silent = TRUE)
-    # Guard: ensure parsed JSON is a list before accessing keys
-    if (inherits(body, "try-error") || is.null(body) || !is.list(body)) next
+    body <- try(fromJSON(paste(raw, collapse = " "), simplifyVector = TRUE), silent = TRUE)
+    if (inherits(body, "try-error") || is.null(body)) next
     val <- body[[chk$key]]
     if (!is.null(val) && length(val) == 1L && nzchar(val)) {
       if (cc == "?") cc <- val
@@ -447,47 +448,51 @@ test_proxy <- function(proxy_str, timeout_secs, geo_checks,
                 score = 0L, proto = "?", bale = FALSE, bale_status = NA_integer_,
                 https_status = NA_integer_, https_url = "", final_url = "",
                 sni_connect_ip = NA_character_, sni_fake_sni = NA_character_))
-  proto <- if (port %in% SOCKS5_PORTS) "socks5" else "http"
+  proto     <- if (port %in% SOCKS5_PORTS) "socks5" else "http"
   proxy_url <- sprintf("%s://%s:%d", proto, host, port)
-  
-  # -- Geo check ---------------------------------------------------------------
-  res <- run_checks(proxy_url, timeout_secs, geo_checks)
-  hits <- res$hits
+
+  #-- Geo check ---------------------------------------------------------------
+  res     <- run_checks(proxy_url, timeout_secs, geo_checks)
+  hits    <- res$hits
   country <- res$country
+
   # SOCKS4 fallback
   if (hits == 0L && proto == "socks5") {
     res4 <- run_checks(sprintf("socks4://%s:%d", host, port), timeout_secs, geo_checks)
     if (res4$hits > hits) {
-      hits <- res4$hits
+      hits    <- res4$hits
       country <- res4$country
-      proto <- "socks4"
+      proto   <- "socks4"
     }
   }
-  # -- Tier 1: 2-of-3 geo sources confirm IR exit ----------------------------
+
+  #-- Tier 1: 2-of-3 geo sources confirm IR exit ----------------------------
   if (hits >= 2L)
     return(list(proxy = proxy_str, ok = TRUE, tier = "IR-exit",
                 country = country, score = hits, proto = proto,
                 bale = FALSE, bale_status = NA_integer_,
                 https_status = NA_integer_, https_url = "",
                 sni_connect_ip = NA_character_, sni_fake_sni = NA_character_))
-  
-  # -- Iranian infra probes (Bale -> Rubika -> Splus) ------------------------
+
+  #-- Iranian infra probes (Bale -> Rubika -> Splus) ------------------------
   FAIL_PROBE <- list(reachable = FALSE, status = NA_integer_, endpoint = NA_character_,
                      final_url = NA_character_, intercepted = FALSE)
-  bale_res <- check_bale(proxy_url, timeout_secs, BALE_ENDPOINTS)
+  bale_res   <- check_bale(proxy_url, timeout_secs, BALE_ENDPOINTS)
   rubika_res <- if (!isTRUE(bale_res$reachable) && !isTRUE(bale_res$intercepted))
     check_iranian_infra(proxy_url, timeout_secs, RUBIKA_ENDPOINTS)
   else FAIL_PROBE
-  splus_res <- if (!isTRUE(bale_res$reachable) && !isTRUE(bale_res$intercepted) &&
+  splus_res  <- if (!isTRUE(bale_res$reachable) && !isTRUE(bale_res$intercepted) &&
                    !isTRUE(rubika_res$reachable) && !isTRUE(rubika_res$intercepted))
     check_iranian_infra(proxy_url, timeout_secs, SPLUS_ENDPOINTS)
   else FAIL_PROBE
+
   iran_probe_score <- sum(c(isTRUE(bale_res$reachable),
                             isTRUE(rubika_res$reachable),
                             isTRUE(splus_res$reachable)))
   any_intercepted <- isTRUE(bale_res$intercepted) ||
     isTRUE(rubika_res$intercepted) ||
     isTRUE(splus_res$intercepted)
+
   if (any_intercepted) {
     first_int <- if (isTRUE(bale_res$intercepted)) bale_res
     else if (isTRUE(rubika_res$intercepted)) rubika_res
@@ -500,43 +505,49 @@ test_proxy <- function(proxy_str, timeout_secs, geo_checks,
                 final_url = first_int$final_url %||% "",
                 sni_connect_ip = NA_character_, sni_fake_sni = NA_character_))
   }
+
   if (iran_probe_score >= 1L) {
     # HTTPS tunnel check (Tier 2 vs 4 split)
     https_res <- check_bale_https(proxy_url, timeout_secs)
     tier <- switch(https_res$tunnel,
-                   "open-200" = "bale-tunnel",
+                   "open-200"     = "bale-tunnel",
                    "open-blocked" = "bale-tunnel-blocked",
-                   "open-other" = "bale-tunnel",
+                   "open-other"   = "bale-tunnel",
                    "bale-bridge")
-    
-    # -- Tier 0: SNI-fronting --------------------------------------------------
+
+    #-- Tier 0: SNI-fronting --------------------------------------------------
+    # Only tested here, on proxies that confirmed HTTPS tunnel capability.
+    # A bale-tunnel proxy that ALSO passes SNI fronting is promoted to Tier 0.
+    # Cost per proxy: 1 curl call on success, N curl calls on failure.
+    # Total proxies reaching this point: ~50, not ~700. Job stays within budget.
     sni_connect_ip <- NA_character_
-    sni_fake_sni <- NA_character_
+    sni_fake_sni   <- NA_character_
     if (tier == "bale-tunnel") {
       sni_res <- check_sni_fronting(proxy_url, timeout_secs, sni_pairs)
       if (isTRUE(sni_res$ok)) {
-        tier <- "sni-fronting"
+        tier           <- "sni-fronting"
         sni_connect_ip <- sni_res$connect_ip
-        sni_fake_sni <- sni_res$fake_sni
+        sni_fake_sni   <- sni_res$fake_sni
       }
     }
-    
-    return(list(proxy = proxy_str,
-                ok = TRUE,
-                tier = tier,
-                country = country,
-                score = hits,
-                proto = proto,
-                bale = isTRUE(bale_res$reachable),
-                bale_status = bale_res$status,
-                iran_probe_score = iran_probe_score,
-                https_status = https_res$https_status,
-                https_url = https_res$https_url %||% "",
-                final_url = bale_res$final_url %||% "",
-                sni_connect_ip = sni_connect_ip,
-                sni_fake_sni = sni_fake_sni))
+
+    return(list(proxy             = proxy_str,
+                ok                = TRUE,
+                tier              = tier,
+                country           = country,
+                score             = hits,
+                proto             = proto,
+                bale              = isTRUE(bale_res$reachable),
+                bale_status       = bale_res$status,
+                iran_probe_score  = iran_probe_score,
+                https_status      = https_res$https_status,
+                https_url         = https_res$https_url %||% "",
+                final_url         = bale_res$final_url %||% "",
+                sni_connect_ip    = sni_connect_ip,
+                sni_fake_sni      = sni_fake_sni))
   }
-  # -- No tier passed --------------------------------------------------------
+
+  #-- No tier passed --------------------------------------------------------
   list(proxy = proxy_str, ok = FALSE, tier = "fail",
        country = country, score = hits, proto = proto,
        bale = FALSE, bale_status = NA_integer_,
@@ -544,7 +555,7 @@ test_proxy <- function(proxy_str, timeout_secs, geo_checks,
        sni_connect_ip = NA_character_, sni_fake_sni = NA_character_)
 }
 
-# -- 6 Load --------------------------------------------------------------------
+#-- 6 Load --------------------------------------------------------------------
 cat(sprintf("Loading proxies from: %s\n", INPUT_FILE))
 proxies <- tryCatch(
   load_proxies(INPUT_FILE),
@@ -559,7 +570,7 @@ total <- length(proxies)
 cat(sprintf("Loaded %d proxies  |  workers=%d  timeout=%ds\n\n",
             total, WORKERS, TIMEOUT))
 
-# -- Pre-test filter: remove corporate proxies --------------------------------
+#-- Pre-test filter: remove corporate proxies --------------------------------
 corp_flags <- vapply(proxies, function(p) {
   ip <- strsplit(p, ":")[[1L]][1L]
   is_corporate_ip(ip)
@@ -573,15 +584,15 @@ if (n_corp > 0L) {
 }
 total <- length(proxies)
 
-# -- Pre-test ordering --------------------------------------------------------
+#-- Pre-test ordering --------------------------------------------------------
 pre_scores <- vapply(proxies, pretest_score, integer(1L))
-proxies <- proxies[order(pre_scores, decreasing = TRUE)]
+proxies    <- proxies[order(pre_scores, decreasing = TRUE)]
 cat(sprintf("Testing %d proxies after filtering (ordered by IR proximity)...\n\n",
             total))
 
-# -- Staleness check ----------------------------------------------------------
+#-- Staleness check ----------------------------------------------------------
 check_staleness <- function(path, warn_hours) {
-  if (!grepl("\\.json$", path, ignore.case = TRUE)) return(invisible(NULL))
+  if (!grepl("\.json$", path, ignore.case = TRUE)) return(invisible(NULL))
   tryCatch({
     dat <- fromJSON(path, simplifyVector = FALSE)
     items <- if (is.null(names(dat))) dat else unname(dat)
@@ -606,10 +617,10 @@ check_staleness <- function(path, warn_hours) {
 }
 check_staleness(INPUT_FILE, STALE_WARN_HOURS)
 
-# -- Load SNI-fronting pairs --------------------------------------------------
+#-- Load SNI-fronting pairs --------------------------------------------------
 SNI_PAIRS <- load_sni_pairs()
 
-# -- 7 Run --------------------------------------------------------------------
+#-- 7 Run --------------------------------------------------------------------
 worker_fn <- function(p) test_proxy(p, TIMEOUT, GEO_CHECKS, SNI_PAIRS)
 t0 <- proc.time()
 if (.Platform$OS.type == "windows" && WORKERS > 1L) {
@@ -643,7 +654,7 @@ if (.Platform$OS.type == "windows" && WORKERS > 1L) {
 }
 elapsed <- (proc.time() - t0)[["elapsed"]]
 
-# -- 8 Print results ----------------------------------------------------------
+#-- 8 Print results ----------------------------------------------------------
 results <- do.call(rbind, lapply(seq_along(results_raw), function(i) {
   r <- results_raw[[i]]
   if (!is.list(r)) {
@@ -657,59 +668,61 @@ results <- do.call(rbind, lapply(seq_along(results_raw), function(i) {
   proto_tag <- sprintf("%-6s", toupper(r$proto %||% "?"))
   tier <- r$tier %||% "fail"
   tag <- switch(tier,
-                "sni-fronting" = sprintf("[ T0 ] SNI-FRONTING        (%s) via %s fake_sni=%s HTTP %s",
-                                         proto_tag,
-                                         r$sni_connect_ip %||% "?",
-                                         r$sni_fake_sni %||% "?",
-                                         r$bale_status %||% "?"),
-                "IR-exit" = sprintf("[ T1 ] IR-EXIT             (%s)", proto_tag),
-                "bale-tunnel" = sprintf("[ T2 ] BALE-TUNNEL         (%s) HTTP %s HTTPS %s",
-                                        proto_tag,
-                                        r$bale_status %||% "?",
-                                        r$https_status %||% "?"),
+                "sni-fronting"        = sprintf("[ T0 ] SNI-FRONTING        (%s) via %s fake_sni=%s HTTP %s",
+                                                proto_tag,
+                                                r$sni_connect_ip %||% "?",
+                                                r$sni_fake_sni %||% "?",
+                                                r$bale_status %||% "?"),
+                "IR-exit"             = sprintf("[ T1 ] IR-EXIT             (%s)", proto_tag),
+                "bale-tunnel"         = sprintf("[ T2 ] BALE-TUNNEL         (%s) HTTP %s HTTPS %s",
+                                                proto_tag,
+                                                r$bale_status %||% "?",
+                                                r$https_status %||% "?"),
                 "bale-tunnel-blocked" = sprintf("[ T3 ] BALE-TUNNEL-BLOCKED (%s) HTTPS %s (IP blocked by Bale)",
                                                 proto_tag, r$https_status %||% "?"),
-                "bale-bridge" = sprintf("[ T4 ] BALE-BRIDGE HTTP-only (%s) HTTP %s",
-                                        proto_tag, r$bale_status %||% "?"),
-                "intercepted" = sprintf("[HIJACK] %s -> %s",
-                                        r$country, r$final_url %||% "?"),
+                "bale-bridge"         = sprintf("[ T4 ] BALE-BRIDGE HTTP-only (%s) HTTP %s",
+                                                proto_tag, r$bale_status %||% "?"),
+                "intercepted"         = sprintf("[HIJACK] %s -> %s",
+                                                r$country, r$final_url %||% "?"),
                 sprintf("[FAIL ] %-4s %d/3 (%s)", r$country, r$score, proto_tag))
   cat(sprintf("[%4d/%d] %-26s  %s\n", i, total, r$proxy, tag))
-  data.frame(proxy = r$proxy,
-             ok = isTRUE(r$ok),
-             tier = tier,
-             country = r$country,
-             score = r$score,
-             proto = r$proto %||% "?",
-             bale = isTRUE(r$bale),
-             bale_status = r$bale_status %||% NA_integer_,
-             https_status = r$https_status %||% NA_integer_,
-             https_url = r$https_url %||% "",
-             final_url = r$final_url %||% "",
+  data.frame(proxy          = r$proxy,
+             ok             = isTRUE(r$ok),
+             tier           = tier,
+             country        = r$country,
+             score          = r$score,
+             proto          = r$proto %||% "?",
+             bale           = isTRUE(r$bale),
+             bale_status    = r$bale_status %||% NA_integer_,
+             https_status   = r$https_status %||% NA_integer_,
+             https_url      = r$https_url %||% "",
+             final_url      = r$final_url %||% "",
              sni_connect_ip = r$sni_connect_ip %||% NA_character_,
-             sni_fake_sni = r$sni_fake_sni %||% NA_character_,
+             sni_fake_sni   = r$sni_fake_sni %||% NA_character_,
              stringsAsFactors = FALSE)
 }))
 
-# -- 9 Summary + save ---------------------------------------------------------
-passed <- results[results$ok, , drop = FALSE]
-sni_fronting <- results[results$tier == "sni-fronting", , drop = FALSE]
-ir_exit <- results[results$tier == "IR-exit", , drop = FALSE]
-bale_tunnel <- results[results$tier == "bale-tunnel", , drop = FALSE]
-bale_tunnel_blk <- results[results$tier == "bale-tunnel-blocked", , drop = FALSE]
-bale_bridge <- results[results$tier == "bale-bridge", , drop = FALSE]
-intercepted <- results[results$tier == "intercepted", , drop = FALSE]
+#-- 9 Summary + save ---------------------------------------------------------
+passed           <- results[results$ok, , drop = FALSE]
+sni_fronting     <- results[results$tier == "sni-fronting", , drop = FALSE]
+ir_exit          <- results[results$tier == "IR-exit", , drop = FALSE]
+bale_tunnel      <- results[results$tier == "bale-tunnel", , drop = FALSE]
+bale_tunnel_blk  <- results[results$tier == "bale-tunnel-blocked", , drop = FALSE]
+bale_bridge      <- results[results$tier == "bale-bridge", , drop = FALSE]
+intercepted      <- results[results$tier == "intercepted", , drop = FALSE]
+
 if (nrow(passed) > 0L) {
   passed$priority <- mapply(priority_score,
                             passed$tier, passed$country, passed$score,
                             passed$proto, passed$bale_status, passed$https_status)
   passed <- passed[order(passed$priority, decreasing = TRUE), ]
-  sni_fronting <- passed[passed$tier == "sni-fronting", , drop = FALSE]
-  ir_exit <- passed[passed$tier == "IR-exit", , drop = FALSE]
-  bale_tunnel <- passed[passed$tier == "bale-tunnel", , drop = FALSE]
+  sni_fronting    <- passed[passed$tier == "sni-fronting", , drop = FALSE]
+  ir_exit         <- passed[passed$tier == "IR-exit", , drop = FALSE]
+  bale_tunnel     <- passed[passed$tier == "bale-tunnel", , drop = FALSE]
   bale_tunnel_blk <- passed[passed$tier == "bale-tunnel-blocked", , drop = FALSE]
-  bale_bridge <- passed[passed$tier == "bale-bridge", , drop = FALSE]
+  bale_bridge     <- passed[passed$tier == "bale-bridge", , drop = FALSE]
 }
+
 cat(sprintf(
   "\n%s\n SNI-fronting (Tier 0)    : %d  (domain-fronted, DPI-resistant)\n IR-exit (Tier 1)         : %d  (full IR routing)\n Bale-tunnel (Tier 2)     : %d  (HTTPS tunnel to web.bale.ai works)\n Bale-tunnel-blk (Tier 3) : %d  (tunnel works, Bale blocks exit IP)\n Bale-bridge (Tier 4)     : %d  (plain HTTP only, no HTTPS tunnel)\n Intercepted              : %d  (hijacked - NOT usable)\n Total passed: %d / %d  (%.1f%%)   Elapsed: %.0fs\n",
   strrep("-", 60),
@@ -719,15 +732,18 @@ cat(sprintf(
   if (total > 0L) 100 * nrow(passed) / total else 0,
   elapsed
 ))
+
 if (nrow(intercepted) > 0L) {
   cat("\nIntercepted proxies (connection hijacked - do NOT use):\n")
   for (i in seq_len(nrow(intercepted)))
     cat(sprintf("  %-26s  redirected to: %s\n",
                 intercepted$proxy[i], intercepted$final_url[i]))
 }
+
 out_dir <- tryCatch(dirname(normalizePath(INPUT_FILE)), error = function(e) getwd())
 r_out <- Sys.getenv("R_OUTPUT_DIR", "")
 if (nzchar(r_out) && dir.exists(r_out)) out_dir <- r_out
+
 if (nrow(sni_fronting) > 0L) {
   cat("\nSNI-fronting proxies - domain-fronted via Cloudflare (best first):\n")
   for (i in seq_len(nrow(sni_fronting)))
@@ -741,6 +757,7 @@ if (nrow(sni_fronting) > 0L) {
   write_json(sni_fronting, file.path(out_dir, "passing_sni_fronting.json"),
              pretty = TRUE, auto_unbox = TRUE)
 }
+
 if (nrow(ir_exit) > 0L) {
   cat("\nIR-exit proxies (best first):\n")
   for (i in seq_len(nrow(ir_exit)))
@@ -751,6 +768,7 @@ if (nrow(ir_exit) > 0L) {
   write_json(ir_exit, file.path(out_dir, "passing_ir_exit.json"),
              pretty = TRUE, auto_unbox = TRUE)
 }
+
 if (nrow(bale_tunnel) > 0L) {
   cat("\nBale-tunnel proxies - HTTPS to web.bale.ai works (best first):\n")
   for (i in seq_len(nrow(bale_tunnel)))
@@ -762,6 +780,7 @@ if (nrow(bale_tunnel) > 0L) {
   write_json(bale_tunnel, file.path(out_dir, "passing_bale_tunnel.json"),
              pretty = TRUE, auto_unbox = TRUE)
 }
+
 if (nrow(bale_tunnel_blk) > 0L) {
   cat("\nBale-tunnel-blocked proxies - HTTPS tunnel works, Bale blocks exit IP:\n")
   for (i in seq_len(nrow(bale_tunnel_blk)))
@@ -772,6 +791,7 @@ if (nrow(bale_tunnel_blk) > 0L) {
   write_json(bale_tunnel_blk, file.path(out_dir, "passing_bale_tunnel_blocked.json"),
              pretty = TRUE, auto_unbox = TRUE)
 }
+
 if (nrow(bale_bridge) > 0L) {
   cat("\nBale-bridge HTTP-only proxies (no HTTPS tunnel):\n")
   for (i in seq_len(nrow(bale_bridge)))
@@ -783,18 +803,18 @@ if (nrow(bale_bridge) > 0L) {
   write_json(bale_bridge, file.path(out_dir, "passing_bale_bridge.json"),
              pretty = TRUE, auto_unbox = TRUE)
 }
+
 if (nrow(passed) > 0L) {
   writeLines(passed$proxy, file.path(out_dir, "passing_all_ranked.txt"))
   write_json(passed, file.path(out_dir, "passing_all_ranked.json"),
              pretty = TRUE, auto_unbox = TRUE)
-  top <- passed$proxy[1]
-  top_tier <- passed$tier[1]
+  top       <- passed$proxy[1]
+  top_tier  <- passed$tier[1]
   top_parts <- strsplit(top, ":")[[1L]]
   cat(sprintf("\n-- Use the top proxy (%s, tier=%s) --\n", top, top_tier))
   if (top_tier == "sni-fronting") {
     cat(sprintf("  config.json: CONNECT_IP=%s  FAKE_SNI=%s  CONNECT_PORT=443\n",
                 passed$sni_connect_ip[1], passed$sni_fake_sni[1]))
-    # Fixed: single-line sprintf to avoid string concatenation syntax error
     cat(sprintf("  curl test: curl -x http://%s --tls-servername %s --resolve tapi.bale.ai:443:%s -k https://tapi.bale.ai/ -I\n",
                 top, passed$sni_fake_sni[1], passed$sni_connect_ip[1]))
   } else {
@@ -803,31 +823,34 @@ if (nrow(passed) > 0L) {
   }
 }
 if (nrow(passed) == 0L) cat("\nNo working proxies found.\n")
+
 if (nrow(passed) > 0L) {
   cat(sprintf("\nSaved to %s:\n", out_dir))
-  if (nrow(sni_fronting) > 0L) cat("  passing_sni_fronting.txt / .json\n")
-  if (nrow(ir_exit) > 0L) cat("  passing_ir_exit.txt / .json\n")
-  if (nrow(bale_tunnel) > 0L) cat("  passing_bale_tunnel.txt / .json\n")
-  if (nrow(bale_tunnel_blk) > 0L) cat("  passing_bale_tunnel_blocked.txt / .json\n")
-  if (nrow(bale_bridge) > 0L) cat("  passing_bale_bridge.txt / .json\n")
+  if (nrow(sni_fronting) > 0L)     cat("  passing_sni_fronting.txt / .json\n")
+  if (nrow(ir_exit) > 0L)          cat("  passing_ir_exit.txt / .json\n")
+  if (nrow(bale_tunnel) > 0L)      cat("  passing_bale_tunnel.txt / .json\n")
+  if (nrow(bale_tunnel_blk) > 0L)  cat("  passing_bale_tunnel_blocked.txt / .json\n")
+  if (nrow(bale_bridge) > 0L)      cat("  passing_bale_bridge.txt / .json\n")
   cat("  passing_all_ranked.txt / .json  (all tiers, priority-sorted)\n")
 }
 
-# -- Country breakdown --------------------------------------------------------
+#-- Country breakdown --------------------------------------------------------
 cat(sprintf("\n%s\n Country breakdown (all %d tested)\n%s\n",
             strrep("-", 40), total, strrep("-", 40)))
 country_tbl <- sort(table(results$country), decreasing = TRUE)
 for (i in seq_along(country_tbl)) {
-  cc <- names(country_tbl)[i]
+  cc    <- names(country_tbl)[i]
   count <- country_tbl[[i]]
-  bar <- strrep("|", min(count, 40L))
-  pct <- 100 * count / total
+  bar   <- strrep("|", min(count, 40L))
+  pct   <- 100 * count / total
   cat(sprintf("  %-6s %4d  (%4.1f%%)  %s\n", cc, count, pct, bar))
 }
+
 cat(sprintf("\n Protocol breakdown\n%s\n", strrep("-", 40)))
 proto_tbl <- sort(table(results$proto), decreasing = TRUE)
 for (i in seq_along(proto_tbl))
   cat(sprintf("  %-8s %4d\n", names(proto_tbl)[i], proto_tbl[[i]]))
+
 if (nrow(sni_fronting) > 0L) {
   cat(sprintf("\n SNI-fronting pair usage\n%s\n", strrep("-", 40)))
   sni_tbl <- sort(table(paste0(sni_fronting$sni_connect_ip, " / ",
