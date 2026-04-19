@@ -1,20 +1,20 @@
-=============================================================================
-test_proxies.R  - Windows-ready, parallel via socket cluster
-INTERACTIVE (RStudio): set INPUT_FILE below and hit Source
-CLI:  Rscript test_proxies.R working_iran_proxies.json
-Rscript test_proxies.R working_iran_proxies.txt --workers 20 --timeout 5
-install.packages(c("jsonlite", "parallel"))   # one-time
-Tier ladder (highest to lowest priority):
-Tier 0: sni-fronting        domain-fronted via Cloudflare, DPI-resistant
-Tier 1: IR-exit             2-of-3 geo sources confirm Iranian exit
-Tier 2: bale-tunnel         HTTPS CONNECT tunnel to web.bale.ai works
-Tier 3: bale-tunnel-blocked tunnel works, Bale blocks exit IP
-Tier 4: bale-bridge         HTTP only, no HTTPS tunnel
-PERFORMANCE NOTE: SNI-fronting (Tier 0) is tested ONLY on proxies that
-already passed Tier 2 (bale-tunnel). This prevents the ~30s per-proxy
-overhead of testing 6 SNI pairs on proxies that will never pass.
-Result: SNI check runs on ~50 proxies instead of ~700.
-=============================================================================
+# =============================================================================
+# test_proxies.R  - Windows-ready, parallel via socket cluster
+# INTERACTIVE (RStudio): set INPUT_FILE below and hit Source
+# CLI:  Rscript test_proxies.R working_iran_proxies.json
+# Rscript test_proxies.R working_iran_proxies.txt --workers 20 --timeout 5
+# install.packages(c("jsonlite", "parallel"))   # one-time
+# Tier ladder (highest to lowest priority):
+# Tier 0: sni-fronting        domain-fronted via Cloudflare, DPI-resistant
+# Tier 1: IR-exit             2-of-3 geo sources confirm Iranian exit
+# Tier 2: bale-tunnel         HTTPS CONNECT tunnel to web.bale.ai works
+# Tier 3: bale-tunnel-blocked tunnel works, Bale blocks exit IP
+# Tier 4: bale-bridge         HTTP only, no HTTPS tunnel
+# PERFORMANCE NOTE: SNI-fronting (Tier 0) is tested ONLY on proxies that
+# already passed Tier 2 (bale-tunnel). This prevents the ~30s per-proxy
+# overhead of testing 6 SNI pairs on proxies that will never pass.
+# Result: SNI check runs on ~50 proxies instead of ~700.
+# =============================================================================
 suppressPackageStartupMessages({
   library(jsonlite)
   library(parallel)
@@ -258,8 +258,8 @@ GEO_CHECKS <- list(
 #-- 4 Load proxies ------------------------------------------------------------
 load_proxies <- function(path) {
   if (!file.exists(path)) stop("File not found: ", path)
-  pat <- "^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d{2,5}$"
-  if (grepl("\.json$", path, ignore.case = TRUE)) {
+  pat <- "^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}:\\d{2,5}$"
+  if (grepl("\\.json$", path, ignore.case = TRUE)) {
     dat    <- fromJSON(path, simplifyVector = FALSE)
     items  <- if (is.null(names(dat))) dat else unname(dat)
     plist  <- vapply(items, function(x) {
@@ -270,7 +270,7 @@ load_proxies <- function(path) {
     lines  <- lines[nzchar(lines) & !startsWith(lines, "#")]
     plist  <- character(0L)
     for (ln in lines) {
-      tok  <- strsplit(ln, "\s+")[[1L]]
+      tok  <- strsplit(ln, "\\s+")[[1L]]
       m    <- tok[grepl(pat, tok)]
       if (length(m)) plist <- c(plist, m[1L])
     }
@@ -592,7 +592,7 @@ cat(sprintf("Testing %d proxies after filtering (ordered by IR proximity)...\n\n
 
 #-- Staleness check ----------------------------------------------------------
 check_staleness <- function(path, warn_hours) {
-  if (!grepl("\.json$", path, ignore.case = TRUE)) return(invisible(NULL))
+  if (!grepl("\\.json$", path, ignore.case = TRUE)) return(invisible(NULL))
   tryCatch({
     dat <- fromJSON(path, simplifyVector = FALSE)
     items <- if (is.null(names(dat))) dat else unname(dat)
