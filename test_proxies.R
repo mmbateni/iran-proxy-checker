@@ -240,14 +240,14 @@ priority_score <- function(tier, country, geo_score, proto, bale_status, https_s
 #-- 2 CLI overrides -----------------------------------------------------------
 local({
   a <- commandArgs(trailingOnly = TRUE)
-  if (length(a) == 0) return()
-  if (!startsWith(a[1], "--")) INPUT_FILE <- a[1]
+  if (length(a) == 0L) return()
+  # First non-flag argument is the input file
+  if (!startsWith(a[1L], "--")) INPUT_FILE <- a[1L]
   for (i in seq_along(a)) {
-    if (a[i] == "--workers" && i < length(a)) WORKERS <- as.integer(a[i+1])
-    if (a[i] == "--timeout" && i < length(a)) TIMEOUT <- as.integer(a[i+1])
+    if (a[i] == "--workers" && i < length(a)) WORKERS <- as.integer(a[i+1L])
+    if (a[i] == "--timeout" && i < length(a)) TIMEOUT <- as.integer(a[i+1L])
   }
 })
-
 #-- 3 Geo-check targets -------------------------------------------------------
 GEO_CHECKS <- list(
   list(url = "http://ip-api.com/json/?fields=status,countryCode", key = "countryCode"),
