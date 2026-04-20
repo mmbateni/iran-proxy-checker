@@ -15,6 +15,7 @@
 # overhead of testing 6 SNI pairs on proxies that will never pass.
 # Result: SNI check runs on ~50 proxies instead of ~700.
 # =============================================================================
+
 suppressPackageStartupMessages({
   library(jsonlite)
   library(parallel)
@@ -23,7 +24,7 @@ suppressPackageStartupMessages({
 `%||%` <- function(a, b) if (!is.null(a) && length(a) > 0L) a else b
 
 #-- 1 Edit these when running interactively in RStudio ------------------------
-INPUT_FILE <- "D:/IR_proxy_testing/working_iran_proxies.json"
+INPUT_FILE <- "working_iran_proxies.json"  # GitHub Actions: relative path
 WORKERS    <- 32L
 TIMEOUT    <- 5L
 
@@ -241,13 +242,13 @@ priority_score <- function(tier, country, geo_score, proto, bale_status, https_s
 local({
   a <- commandArgs(trailingOnly = TRUE)
   if (length(a) == 0L) return()
-  # First non-flag argument is the input file
   if (!startsWith(a[1L], "--")) INPUT_FILE <- a[1L]
   for (i in seq_along(a)) {
     if (a[i] == "--workers" && i < length(a)) WORKERS <- as.integer(a[i+1L])
     if (a[i] == "--timeout" && i < length(a)) TIMEOUT <- as.integer(a[i+1L])
   }
 })
+
 #-- 3 Geo-check targets -------------------------------------------------------
 GEO_CHECKS <- list(
   list(url = "http://ip-api.com/json/?fields=status,countryCode", key = "countryCode"),
@@ -398,15 +399,6 @@ check_bale_https <- function(proxy_url, timeout_secs) {
 }
 
 #-- 5c Test one proxy ---------------------------------------------------------
-# Tier order and performance rationale:
-# Geo check     -> fast, rules out 90% of candidates immediately
-# Tier 1        -> IR-exit confirmed, return early
-# Bale/infra    -> Tier 2-4 candidates identified
-# HTTPS tunnel  -> Tier 2 vs 4 split
-# Tier 0 (SNI)  -> ONLY on Tier 2 proxies (bale-tunnel)
-# Cost: ~1 SNI pair x timeout_secs for successes,
-# ~N pairs x timeout_secs for failures — but N is now
-# ~50 not ~700, so total added time is negligible.
 run_checks <- function(purl, timeout_secs, geo_checks) {
   h <- 0L; cc <- "?"
   for (chk in geo_checks) {
@@ -423,7 +415,7 @@ run_checks <- function(purl, timeout_secs, geo_checks) {
                silent = TRUE)
     if (inherits(raw, "try-error") || length(raw) == 0L) next
     body <- try(fromJSON(paste(raw, collapse = " "), simplifyVector = TRUE), silent = TRUE)
-    if (inherits(body, "try-error") || is.null(body)) next
+    if (inherits(body, "try-error") || is.null(body) || !is.list(body)) next
     val <- body[[chk$key]]
     if (!is.null(val) && length(val) == 1L && nzchar(val)) {
       if (cc == "?") cc <- val
@@ -516,10 +508,6 @@ test_proxy <- function(proxy_str, timeout_secs, geo_checks,
                    "bale-bridge")
 
     #-- Tier 0: SNI-fronting --------------------------------------------------
-    # Only tested here, on proxies that confirmed HTTPS tunnel capability.
-    # A bale-tunnel proxy that ALSO passes SNI fronting is promoted to Tier 0.
-    # Cost per proxy: 1 curl call on success, N curl calls on failure.
-    # Total proxies reaching this point: ~50, not ~700. Job stays within budget.
     sni_connect_ip <- NA_character_
     sni_fake_sni   <- NA_character_
     if (tier == "bale-tunnel") {
