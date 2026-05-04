@@ -14,10 +14,24 @@
     "priority": 865
   },
   {
-    "proxy": "138.124.99.216:8888",
+    "proxy": "173.212.246.157:3128",
     "ok": true,
     "tier": "bale-tunnel",
-    "country": "FI",
+    "country": "FR",
+    "score": 0,
+    "proto": "http",
+    "bale": true,
+    "bale_status": 404,
+    "https_status": 200,
+    "https_url": "",
+    "final_url": "page not found404",
+    "priority": 865
+  },
+  {
+    "proxy": "37.187.109.70:10111",
+    "ok": true,
+    "tier": "bale-tunnel",
+    "country": "FR",
     "score": 0,
     "proto": "http",
     "bale": false,
@@ -54,10 +68,10 @@
     "priority": 850
   },
   {
-    "proxy": "47.89.184.18:3128",
+    "proxy": "8.213.151.128:3128",
     "ok": true,
     "tier": "bale-tunnel",
-    "country": "US",
+    "country": "KR",
     "score": 0,
     "proto": "http",
     "bale": true,
@@ -68,17 +82,15 @@
     "priority": 850
   },
   {
-    "proxy": "8.219.97.248:80",
+    "proxy": "47.89.184.18:3128",
     "ok": true,
     "tier": "bale-tunnel",
-    "country": "SG",
+    "country": "US",
     "score": 0,
     "proto": "http",
-    "bale": true,
-    "bale_status": 404,
+    "bale": false,
     "https_status": 200,
     "https_url": "",
-    "final_url": "page not found404",
     "priority": 850
   },
   {
@@ -86,6 +98,20 @@
     "ok": true,
     "tier": "bale-tunnel",
     "country": "JP",
+    "score": 0,
+    "proto": "http",
+    "bale": true,
+    "bale_status": 404,
+    "https_status": 200,
+    "https_url": "",
+    "final_url": "page not found404",
+    "priority": 850
+  },
+  {
+    "proxy": "137.59.47.73:3128",
+    "ok": true,
+    "tier": "bale-tunnel",
+    "country": "VN",
     "score": 0,
     "proto": "http",
     "bale": true,
@@ -125,6 +151,20 @@
   },
   {
     "proxy": "152.32.132.190:7890",
+    "ok": true,
+    "tier": "bale-tunnel",
+    "country": "HK",
+    "score": 0,
+    "proto": "http",
+    "bale": true,
+    "bale_status": 404,
+    "https_status": 200,
+    "https_url": "",
+    "final_url": "page not found404",
+    "priority": 850
+  },
+  {
+    "proxy": "120.92.108.86:7890",
     "ok": true,
     "tier": "bale-tunnel",
     "country": "HK",
