@@ -1,15 +1,17 @@
 [
   {
-    "proxy": "46.8.233.226:1080",
+    "proxy": "185.13.134.202:1080",
     "ok": true,
     "tier": "bale-tunnel",
-    "country": "FI",
+    "country": "RU",
     "score": 0,
     "proto": "socks5",
-    "bale": false,
+    "bale": true,
+    "bale_status": 308,
     "https_status": 200,
     "https_url": "",
-    "priority": 895
+    "final_url": "",
+    "priority": 905
   },
   {
     "proxy": "212.48.150.38:1080",
@@ -29,7 +31,7 @@
     "proxy": "77.105.139.108:1080",
     "ok": true,
     "tier": "bale-tunnel",
-    "country": "?",
+    "country": "NL",
     "score": 0,
     "proto": "socks5",
     "bale": true,
@@ -37,20 +39,18 @@
     "https_status": 200,
     "https_url": "",
     "final_url": "page not found404",
-    "priority": 880
+    "priority": 895
   },
   {
-    "proxy": "37.187.109.70:10111",
+    "proxy": "47.91.65.23:3128",
     "ok": true,
     "tier": "bale-tunnel",
-    "country": "FR",
+    "country": "DE",
     "score": 0,
     "proto": "http",
-    "bale": true,
-    "bale_status": 404,
+    "bale": false,
     "https_status": 200,
     "https_url": "",
-    "final_url": "page not found404",
     "priority": 865
   },
   {
@@ -60,26 +60,10 @@
     "country": "KZ",
     "score": 0,
     "proto": "http",
-    "bale": true,
-    "bale_status": 404,
+    "bale": false,
     "https_status": 200,
     "https_url": "",
-    "final_url": "page not found404",
     "priority": 865
-  },
-  {
-    "proxy": "113.160.132.26:8080",
-    "ok": true,
-    "tier": "bale-tunnel",
-    "country": "VN",
-    "score": 0,
-    "proto": "http",
-    "bale": true,
-    "bale_status": 404,
-    "https_status": 200,
-    "https_url": "",
-    "final_url": "page not found404",
-    "priority": 850
   },
   {
     "proxy": "1.231.81.166:3128",
@@ -88,30 +72,16 @@
     "country": "KR",
     "score": 0,
     "proto": "http",
-    "bale": true,
-    "bale_status": 404,
-    "https_status": 200,
-    "https_url": "",
-    "final_url": "page not found404",
-    "priority": 850
-  },
-  {
-    "proxy": "8.213.151.128:3128",
-    "ok": true,
-    "tier": "bale-tunnel",
-    "country": "KR",
-    "score": 0,
-    "proto": "http",
     "bale": false,
     "https_status": 200,
     "https_url": "",
     "priority": 850
   },
   {
-    "proxy": "47.243.92.199:3128",
+    "proxy": "47.89.184.18:3128",
     "ok": true,
     "tier": "bale-tunnel",
-    "country": "HK",
+    "country": "US",
     "score": 0,
     "proto": "http",
     "bale": true,
@@ -119,18 +89,6 @@
     "https_status": 200,
     "https_url": "",
     "final_url": "page not found404",
-    "priority": 850
-  },
-  {
-    "proxy": "8.219.97.248:80",
-    "ok": true,
-    "tier": "bale-tunnel",
-    "country": "SG",
-    "score": 0,
-    "proto": "http",
-    "bale": false,
-    "https_status": 200,
-    "https_url": "",
     "priority": 850
   },
   {
@@ -190,17 +148,29 @@
     "priority": 850
   },
   {
-    "proxy": "128.140.113.110:8081",
+    "proxy": "138.197.68.35:4857",
     "ok": true,
     "tier": "bale-tunnel",
     "country": "?",
     "score": 0,
     "proto": "http",
     "bale": true,
-    "bale_status": 404,
+    "bale_status": 502,
     "https_status": 200,
     "https_url": "",
-    "final_url": "page not found404",
+    "final_url": "",
+    "priority": 850
+  },
+  {
+    "proxy": "103.154.152.104:8090",
+    "ok": true,
+    "tier": "bale-tunnel",
+    "country": "ID",
+    "score": 0,
+    "proto": "http",
+    "bale": false,
+    "https_status": 200,
+    "https_url": "",
     "priority": 850
   }
 ]
