@@ -1,47 +1,23 @@
 [
   {
-    "proxy": "46.241.57.29:1080",
+    "proxy": "95.80.103.217:1080",
     "ok": true,
     "tier": "bale-tunnel",
     "country": "RU",
     "score": 0,
     "proto": "socks5",
     "bale": true,
-    "bale_status": 404,
+    "bale_status": 301,
     "https_status": 200,
     "https_url": "",
-    "final_url": "page not found404",
-    "priority": 895
+    "final_url": "",
+    "priority": 905
   },
   {
-    "proxy": "212.48.150.38:1080",
+    "proxy": "113.160.132.26:8080",
     "ok": true,
     "tier": "bale-tunnel",
-    "country": "RU",
-    "score": 0,
-    "proto": "socks5",
-    "bale": false,
-    "https_status": 200,
-    "https_url": "",
-    "priority": 895
-  },
-  {
-    "proxy": "77.105.139.108:1080",
-    "ok": true,
-    "tier": "bale-tunnel",
-    "country": "?",
-    "score": 0,
-    "proto": "socks5",
-    "bale": false,
-    "https_status": 200,
-    "https_url": "",
-    "priority": 880
-  },
-  {
-    "proxy": "1.231.81.166:3128",
-    "ok": true,
-    "tier": "bale-tunnel",
-    "country": "KR",
+    "country": "VN",
     "score": 0,
     "proto": "http",
     "bale": true,
@@ -52,7 +28,7 @@
     "priority": 850
   },
   {
-    "proxy": "8.213.151.128:3128",
+    "proxy": "1.231.81.166:3128",
     "ok": true,
     "tier": "bale-tunnel",
     "country": "KR",
@@ -86,37 +62,9 @@
     "country": "JP",
     "score": 0,
     "proto": "http",
-    "bale": true,
-    "bale_status": 404,
-    "https_status": 200,
-    "https_url": "",
-    "final_url": "page not found404",
-    "priority": 850
-  },
-  {
-    "proxy": "47.91.104.88:3128",
-    "ok": true,
-    "tier": "bale-tunnel",
-    "country": "AE",
-    "score": 0,
-    "proto": "http",
     "bale": false,
     "https_status": 200,
     "https_url": "",
-    "priority": 850
-  },
-  {
-    "proxy": "138.197.68.35:4857",
-    "ok": true,
-    "tier": "bale-tunnel",
-    "country": "US",
-    "score": 0,
-    "proto": "http",
-    "bale": true,
-    "bale_status": 502,
-    "https_status": 200,
-    "https_url": "",
-    "final_url": "",
     "priority": 850
   },
   {
