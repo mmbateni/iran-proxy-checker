@@ -1,6 +1,34 @@
 [
   {
+    "proxy": "47.91.65.23:3128",
+    "ok": true,
+    "tier": "bale-tunnel",
+    "country": "DE",
+    "score": 0,
+    "proto": "http",
+    "bale": true,
+    "bale_status": 404,
+    "https_status": 200,
+    "https_url": "",
+    "final_url": "page not found404",
+    "priority": 865
+  },
+  {
     "proxy": "173.212.246.157:3128",
+    "ok": true,
+    "tier": "bale-tunnel",
+    "country": "FR",
+    "score": 0,
+    "proto": "http",
+    "bale": true,
+    "bale_status": 404,
+    "https_status": 200,
+    "https_url": "",
+    "final_url": "page not found404",
+    "priority": 865
+  },
+  {
+    "proxy": "37.187.109.70:10111",
     "ok": true,
     "tier": "bale-tunnel",
     "country": "FR",
@@ -56,20 +84,6 @@
     "priority": 850
   },
   {
-    "proxy": "8.213.151.128:3128",
-    "ok": true,
-    "tier": "bale-tunnel",
-    "country": "KR",
-    "score": 0,
-    "proto": "http",
-    "bale": true,
-    "bale_status": 404,
-    "https_status": 200,
-    "https_url": "",
-    "final_url": "page not found404",
-    "priority": 850
-  },
-  {
     "proxy": "47.243.92.199:3128",
     "ok": true,
     "tier": "bale-tunnel",
@@ -84,17 +98,17 @@
     "priority": 850
   },
   {
-    "proxy": "5.161.50.82:8118",
+    "proxy": "47.89.184.18:3128",
     "ok": true,
     "tier": "bale-tunnel",
-    "country": "?",
+    "country": "US",
     "score": 0,
     "proto": "http",
     "bale": true,
-    "bale_status": 503,
+    "bale_status": 404,
     "https_status": 200,
     "https_url": "",
-    "final_url": "",
+    "final_url": "page not found404",
     "priority": 850
   },
   {
@@ -104,11 +118,9 @@
     "country": "JP",
     "score": 0,
     "proto": "http",
-    "bale": true,
-    "bale_status": 404,
+    "bale": false,
     "https_status": 200,
     "https_url": "",
-    "final_url": "page not found404",
     "priority": 850
   },
   {
@@ -151,6 +163,18 @@
     "https_status": 200,
     "https_url": "",
     "final_url": "page not found404",
+    "priority": 850
+  },
+  {
+    "proxy": "103.82.246.19:6080",
+    "ok": true,
+    "tier": "bale-tunnel",
+    "country": "?",
+    "score": 0,
+    "proto": "http",
+    "bale": false,
+    "https_status": 200,
+    "https_url": "",
     "priority": 850
   }
 ]
