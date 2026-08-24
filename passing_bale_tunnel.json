@@ -1,17 +1,17 @@
 [
   {
-    "proxy": "46.241.57.29:1080",
+    "proxy": "47.91.65.23:3128",
     "ok": true,
     "tier": "bale-tunnel",
-    "country": "RU",
+    "country": "DE",
     "score": 0,
-    "proto": "socks5",
+    "proto": "http",
     "bale": true,
     "bale_status": 404,
     "https_status": 200,
     "https_url": "",
     "final_url": "page not found404",
-    "priority": 895
+    "priority": 865
   },
   {
     "proxy": "1.231.81.166:3128",
@@ -28,38 +28,34 @@
     "priority": 850
   },
   {
+    "proxy": "115.127.95.82:8080",
+    "ok": true,
+    "tier": "bale-tunnel",
+    "country": "?",
+    "score": 0,
+    "proto": "http",
+    "bale": false,
+    "https_status": 200,
+    "https_url": "",
+    "priority": 850
+  },
+  {
     "proxy": "8.213.151.128:3128",
     "ok": true,
     "tier": "bale-tunnel",
     "country": "KR",
     "score": 0,
     "proto": "http",
-    "bale": true,
-    "bale_status": 404,
+    "bale": false,
     "https_status": 200,
     "https_url": "",
-    "final_url": "page not found404",
     "priority": 850
   },
   {
-    "proxy": "47.89.184.18:3128",
+    "proxy": "47.243.92.199:3128",
     "ok": true,
     "tier": "bale-tunnel",
-    "country": "US",
-    "score": 0,
-    "proto": "http",
-    "bale": true,
-    "bale_status": 404,
-    "https_status": 200,
-    "https_url": "",
-    "final_url": "page not found404",
-    "priority": 850
-  },
-  {
-    "proxy": "8.209.255.13:3128",
-    "ok": true,
-    "tier": "bale-tunnel",
-    "country": "JP",
+    "country": "HK",
     "score": 0,
     "proto": "http",
     "bale": true,
@@ -81,6 +77,42 @@
     "https_status": 200,
     "https_url": "",
     "final_url": "page not found404",
+    "priority": 850
+  },
+  {
+    "proxy": "103.156.75.243:3125",
+    "ok": true,
+    "tier": "bale-tunnel",
+    "country": "ID",
+    "score": 0,
+    "proto": "http",
+    "bale": false,
+    "https_status": 200,
+    "https_url": "",
+    "priority": 850
+  },
+  {
+    "proxy": "103.82.246.19:6080",
+    "ok": true,
+    "tier": "bale-tunnel",
+    "country": "?",
+    "score": 0,
+    "proto": "http",
+    "bale": false,
+    "https_status": 200,
+    "https_url": "",
+    "priority": 850
+  },
+  {
+    "proxy": "128.140.113.110:8081",
+    "ok": true,
+    "tier": "bale-tunnel",
+    "country": "?",
+    "score": 0,
+    "proto": "http",
+    "bale": false,
+    "https_status": 200,
+    "https_url": "",
     "priority": 850
   }
 ]
