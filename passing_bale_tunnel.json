@@ -1,31 +1,5 @@
 [
   {
-    "proxy": "212.33.248.45:1080",
-    "ok": true,
-    "tier": "bale-tunnel",
-    "country": "RU",
-    "score": 0,
-    "proto": "socks5",
-    "bale": false,
-    "https_status": 200,
-    "https_url": "",
-    "priority": 895
-  },
-  {
-    "proxy": "212.48.150.38:1080",
-    "ok": true,
-    "tier": "bale-tunnel",
-    "country": "RU",
-    "score": 0,
-    "proto": "socks5",
-    "bale": true,
-    "bale_status": 404,
-    "https_status": 200,
-    "https_url": "",
-    "final_url": "page not found404",
-    "priority": 895
-  },
-  {
     "proxy": "47.91.65.23:3128",
     "ok": true,
     "tier": "bale-tunnel",
@@ -40,38 +14,22 @@
     "priority": 865
   },
   {
-    "proxy": "37.187.109.70:10111",
+    "proxy": "167.250.141.73:8080",
     "ok": true,
     "tier": "bale-tunnel",
-    "country": "FR",
+    "country": "?",
     "score": 0,
     "proto": "http",
-    "bale": true,
-    "bale_status": 404,
+    "bale": false,
     "https_status": 200,
     "https_url": "",
-    "final_url": "page not found404",
-    "priority": 865
+    "priority": 850
   },
   {
     "proxy": "8.213.151.128:3128",
     "ok": true,
     "tier": "bale-tunnel",
-    "country": "KR",
-    "score": 0,
-    "proto": "http",
-    "bale": true,
-    "bale_status": 404,
-    "https_status": 200,
-    "https_url": "",
-    "final_url": "page not found404",
-    "priority": 850
-  },
-  {
-    "proxy": "47.243.92.199:3128",
-    "ok": true,
-    "tier": "bale-tunnel",
-    "country": "HK",
+    "country": "?",
     "score": 0,
     "proto": "http",
     "bale": true,
@@ -110,17 +68,17 @@
     "priority": 850
   },
   {
-    "proxy": "47.91.104.88:3128",
+    "proxy": "138.197.68.35:4857",
     "ok": true,
     "tier": "bale-tunnel",
-    "country": "AE",
+    "country": "?",
     "score": 0,
     "proto": "http",
     "bale": true,
-    "bale_status": 404,
+    "bale_status": 502,
     "https_status": 200,
     "https_url": "",
-    "final_url": "page not found404",
+    "final_url": "",
     "priority": 850
   }
 ]
